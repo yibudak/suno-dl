@@ -13,10 +13,11 @@ songs, which Suno serves only to its own player, come through a headless Chrome.
 
 </div>
 
-`suno-dl` signs in with your Suno session, lists the songs your account owns, and
-saves the original audio. It reads the file back before reporting success, so a
-dropped connection fails the song instead of leaving a half file. Ask for mp3,
-flac, wav, opus or m4a and it runs the conversion through ffmpeg.
+`suno-dl` is unofficial and not affiliated with Suno. It signs in with your Suno
+session, lists the songs your account owns, and saves the original audio. It reads
+the file back before reporting success, so a dropped connection fails the song
+instead of leaving a half file. Ask for mp3, flac, wav, opus or m4a and it runs the
+conversion through ffmpeg.
 
 Public songs download straight from the CDN. Private songs have no such file, so
 the tool plays them in a hidden Chrome and records what the player decodes. Either
@@ -209,14 +210,41 @@ macOS and Windows. It also builds a wheel, installs it, and runs `suno-dl
 --version`. Pushing a `v*.*.*` tag builds the release, attaches it to a GitHub
 Release, and publishes to PyPI through trusted publishing.
 
-## Fair use
+## Disclaimer
 
-The tool authenticates as **you** and downloads what your account can already
-play. Download your own work, or work you have the right to keep.
+`suno-dl` is unofficial. It is not made by, endorsed by or supported by Suno, and
+it talks to endpoints Suno's own web client uses rather than a public API contract.
 
-The capture path is not a key server and does not hold a licence: it records audio
-Suno's own page has already decrypted in the browser, and it costs Suno no download
-quota. Respect the platform's terms and the artists.
+**What it does legally.** It authenticates as **you** and fetches what your account
+can already play. Nobody checks whether the songs are yours, so download your own
+work, or work you have the right to keep.
+
+**How far the capture goes.** The private path is not a key server and holds no
+licence. It records audio that Suno's own page has already decrypted inside the
+browser. It needs Chrome, it depends on the shape of Suno's player and its DOM, and
+it will break when that markup changes. Public songs are fetched as plain files and
+are not affected.
+
+**What the files are.** `--format original` saves the stream the player receives,
+which is Opus in an MP4 container, not Suno's own download artifact. Any `mp3`,
+`m4a` or `flac` run re-encodes and is therefore lossier than the source. Nothing
+here is bit-identical to what the official button produces.
+
+**Quota and terms.** The tool never calls the official download endpoint, so a run
+costs no download credit. Suno can change the rules, the plan requirements or the
+encryption at any time, and this project may lag behind.
+
+**Your data.** Your session token stays local: in whatever file you pass with
+`--session`, or in `./token`, and inside the throwaway browser profiles under
+`~/.suno-dl`. Download history lives in `~/.suno-dl/history.json`. Nothing is sent
+anywhere except to Suno.
+
+**No warranty.** The software is provided as is. Verify a file before you rely on
+it, and keep your own copies of anything you care about.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ## License
 
