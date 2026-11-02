@@ -279,6 +279,27 @@ def test_no_capture_keeps_the_browser_off(tmp_path: Path):
     assert "PRIVATE" in line
 
 
+def test_signed_out_page_is_reported(tmp_path: Path):
+    down = _downloader(tmp_path)
+
+    class Stub:
+        def fetch(self, clip, dest, duration, quiet=False):
+            dest.write_bytes(b"")
+            return {
+                "reason": "timeout",
+                "bytes": 0,
+                "duration": 0.0,
+                "dropped": 0,
+                "errors": [],
+                "page": "/discover Home Explore Log in",
+            }
+
+    down.capture = Stub()
+    line = down.process(dict(CLIP, title="Private One", status="complete"))
+    assert "AUTH" in line
+    assert "signed out" in line
+
+
 def test_empty_capture_is_an_error(tmp_path: Path):
     down = _downloader(tmp_path)
 

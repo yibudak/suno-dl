@@ -1476,9 +1476,13 @@ class Downloader:
                 )
                 played = stats["duration"]
                 if stats["bytes"] < MIN_MEDIA_BYTES:
+                    page = str(stats.get("page") or "")
+                    if "Log in" in page or "Sign up" in page:
+                        raise SunoError(
+                            "the page is signed out. Copy a fresh __session and run again", "AUTH"
+                        )
                     raise SunoError(
-                        f"the player gave back {stats['bytes']} bytes ({stats['reason']}): "
-                        f"{stats.get('page', '')[:120]}",
+                        f"the player gave back {stats['bytes']} bytes ({stats['reason']}): {page[:120]}",
                         "CAPTURE",
                     )
                 if fmt == "original":
