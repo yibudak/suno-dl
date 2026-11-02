@@ -192,6 +192,29 @@ def test_fetch_writes_the_stream(tmp_path: Path):
     assert fake.navigated == [f"https://suno.com/song/{CLIP['id']}"]
 
 
+def test_fetch_stops_on_a_full_buffer_not_the_playhead(tmp_path: Path):
+    """A buffered song must not be waited out at 1x."""
+    capture = _capture()
+    fake = FakeDevTools(total=200.0, chunk=b"q", limit=2)
+    fake.ev = lambda expression, timeout=60.0: (
+        {"b64": [base64.b64encode(b"q" * 4).decode()], "bytes": 4}
+        if "__capDrain" in expression
+        else {"t": 1.5, "d": 200.0, "ended": False, "buffered": 200.0, "rate": 16.0}
+        if "__capMedia" in expression
+        else {"bytes": 4}
+        if "__capStatus" in expression
+        else "button"
+    )
+    dest = tmp_path / "buffered.mp4"
+    stats = capture._fetch(fake, CLIP["id"], dest, 200.0, quiet=True)
+    assert stats["reason"] == "buffered"
+    assert stats["duration"] == pytest.approx(200.0)
+
+
+def test_default_rate_is_capped():
+    assert min(20.0, float(suno_dl.os.environ.get("SUNO_DL_SPEED", "16"))) == suno_dl.PLAY_RATE
+
+
 def test_fetch_stops_when_the_media_ends(tmp_path: Path):
     capture = _capture()
     fake = FakeDevTools(total=0.0, chunk=b"y" * 10)
@@ -265,11 +288,45 @@ def test_public_clip_skips_the_browser(tmp_path: Path):
     assert line.startswith("ok:"), line
 
 
-def test_capture_without_a_session_says_so(tmp_path: Path):
+def test_private_capture_without_a_session_says_so(tmp_path: Path):
     down = _downloader(tmp_path, auth=None)
     down.api.auth = None
+    down.has_auth = False
     line = down.process(dict(CLIP, title="Private One", status="complete"))
     assert "NO_SESSION" in line
+
+
+def test_public_capture_runs_without_a_session(tmp_path: Path):
+    down = _downloader(tmp_path, auth=None)
+    down.api.auth = None
+    down.has_auth = False
+    down.args.capture = True
+    seen: list[str] = []
+
+    class Stub:
+        def fetch(self, clip, dest, duration, quiet=False):
+            seen.append("captured")
+            dest.write_bytes(b"\x00\x00\x00\x1cftyp" + b"m" * 5000)
+            return {
+                "reason": "duration",
+                "bytes": 5004,
+                "duration": 9.0,
+                "dropped": 0,
+                "errors": [],
+            }
+
+    down.capture = Stub()
+    line = down.process(
+        {
+            "id": CLIP["id"],
+            "title": "Public One",
+            "status": "complete",
+            "is_public": True,
+            "video_url": "https://cdn1.suno.ai/x.mp4",
+        }
+    )
+    assert seen == ["captured"]
+    assert line.startswith("ok:"), line
 
 
 def test_no_capture_keeps_the_browser_off(tmp_path: Path):

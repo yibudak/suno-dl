@@ -59,7 +59,7 @@ HISTORY_FILE = STATE_DIR / "history.json"
 
 __version__ = "1.1.0"
 
-JWT_REFRESH_MARGIN = 120  # seconds before expiry to re-mint
+JWT_REFRESH_MARGIN = 30  # seconds before expiry to re-mint
 
 FORMATS = {
     # name      extension   ffmpeg codec        default bitrate (kbps)
@@ -994,6 +994,11 @@ CAPTURE_JS = r"""
   const state = { chunks: [], sizes: [], sources: 0, dropped: 0, errors: [] };
   const append = SourceBuffer.prototype.appendBuffer;
   const add = MediaSource.prototype.addSourceBuffer;
+  // Suno keeps an idle <audio> next to the real one. Prefer the element that
+  // carries a source, or every reading below is about the wrong element.
+  const pick = () =>
+    Array.from(document.querySelectorAll('audio, video')).find((m) => m.currentSrc || m.readyState > 0) ||
+    document.querySelector('audio, video');
   MediaSource.prototype.addSourceBuffer = function (...args) {
     state.sources++;
     return add.apply(this, args);
@@ -1033,16 +1038,41 @@ CAPTURE_JS = r"""
     return { b64: out, bytes };
   };
   window.__capMedia = () => {
-    const media = document.querySelector('audio, video');
-    return media
-      ? { t: media.currentTime, d: media.duration, ended: media.ended, paused: media.paused }
-      : null;
+    const media = pick();
+    if (!media) return null;
+    const ranges = media.buffered;
+    return {
+      t: media.currentTime,
+      d: media.duration,
+      ended: media.ended,
+      paused: media.paused,
+      buffered: ranges.length ? ranges.end(ranges.length - 1) : 0,
+      rate: media.playbackRate,
+      src: (media.currentSrc || '').slice(0, 5),
+    };
+  };
+  window.__capRate = (rate) => {
+    const media = pick();
+    if (!media) return null;
+    media.playbackRate = rate;
+    return media.playbackRate;
+  };
+  window.__capSkip = () => {
+    const media = pick();
+    if (!media || !media.buffered.length) return null;
+    media.currentTime = media.buffered.end(media.buffered.length - 1);
+    return media.currentTime;
+  };
+  window.__capResume = () => {
+    const media = pick();
+    if (media) { media.play(); return 'element'; }
+    return window.__capPlay();
   };
   window.__capPlay = () => {
     const label = (el) => el.getAttribute('aria-label') || el.title || '';
     const button = Array.from(document.querySelectorAll('button')).find((b) => /^play/i.test(label(b)));
     if (button) { button.click(); return 'button'; }
-    const media = document.querySelector('audio, video');
+    const media = pick();
     if (media) { media.play(); return 'element'; }
     return 'none';
   };
@@ -1050,9 +1080,11 @@ CAPTURE_JS = r"""
 """
 
 PLAY_POLL = 0.5  # seconds between page readiness polls
+PLAY_RATE = min(20.0, float(os.environ.get("SUNO_DL_SPEED", "16")))  # playback rate while capturing
 DRAIN_POLL = 0.5  # seconds between drains
 MAX_MEDIA_BYTES = 128 * 1048576
-STALL_POLLS = 24  # 12 seconds without a new byte
+STALL_POLLS = 40  # 20 seconds without progress before giving up
+RESUME_TRIES = 40
 MIN_MEDIA_BYTES = 4096  # anything shorter is a broken capture, not a song
 
 
@@ -1217,7 +1249,7 @@ class DevTools:
 class Capture:
     """One browser for the whole run, one song at a time."""
 
-    def __init__(self, token: str, quiet: bool = False) -> None:
+    def __init__(self, token: str | None, quiet: bool = False) -> None:
         self.token = token
         self.quiet = quiet
         self.lock = threading.Lock()
@@ -1273,18 +1305,19 @@ class Capture:
         devtools.attach()
         for method in ("Page.enable", "Network.enable", "Runtime.enable"):
             devtools.call(method)
-        devtools.call(
-            "Network.setCookie",
-            {
-                "name": "__session",
-                "value": self.token,
-                "domain": ".suno.com",
-                "path": "/",
-                "secure": True,
-                "httpOnly": True,
-                "sameSite": "Lax",
-            },
-        )
+        if self.token:
+            devtools.call(
+                "Network.setCookie",
+                {
+                    "name": "__session",
+                    "value": self.token,
+                    "domain": ".suno.com",
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": True,
+                    "sameSite": "Lax",
+                },
+            )
         devtools.call("Page.addScriptToEvaluateOnNewDocument", {"source": CAPTURE_JS})
         self.devtools = devtools
         return devtools
@@ -1317,7 +1350,7 @@ class Capture:
         while time.monotonic() < deadline:
             time.sleep(1.0)
             if devtools.ev("!!document.querySelector('audio, video')"):
-                devtools.ev("window.__capRate ? window.__capRate(1) : 0")
+                devtools.ev(f"window.__capRate ? window.__capRate({PLAY_RATE}) : 0")
                 devtools.ev("window.__capPlay ? window.__capPlay() : 'none'")
             if (devtools.ev("window.__capStatus ? window.__capStatus() : null") or {}).get("bytes"):
                 break
@@ -1325,7 +1358,9 @@ class Capture:
         deadline = started + max(120.0, (duration or 240.0) * 3 + 120)
         written = 0
         stalls = 0
-        last = 0
+        resumes = 0
+        last_played = 0.0
+        last_written = 0
         reason = "timeout"
         with dest.open("wb") as out:
             while time.monotonic() < deadline:
@@ -1342,17 +1377,36 @@ class Capture:
                     reason = "size"
                     break
                 media = devtools.ev("window.__capMedia ? window.__capMedia() : null") or {}
+                if media.get("rate") and float(media["rate"]) != PLAY_RATE:
+                    devtools.ev(f"window.__capRate ? window.__capRate({PLAY_RATE}) : 0")
                 played = float(media.get("t") or 0)
                 total = float(media.get("d") or duration or 0)
                 if media.get("ended"):
                     reason = "ended"
                     break
+                # Chrome fetches ahead of the playhead, so a full buffer means the
+                # whole song is already through the hook. Do not wait it out.
+                if total and float(media.get("buffered") or 0) >= total - 0.15:
+                    reason = "buffered"
+                    break
                 if total and played >= total - 0.35:
                     reason = "duration"
                     break
-                stalls = stalls + 1 if written == last else 0
-                last = written
-                if stalls > STALL_POLLS and played > 1:
+                moved = played > last_played + 0.01 or written > last_written
+                last_played = max(played, last_played)
+                last_written = written
+                stalls = 0 if moved else stalls + 1
+                # The player pauses itself when it runs dry. Nudge it and keep
+                # draining instead of treating that as the end.
+                # Playback only stays a window ahead. Jump the head to the end of
+                # what is buffered so the player fetches the next window now.
+                buffered = float(media.get("buffered") or 0)
+                if total and buffered and played >= buffered - 1.5 and buffered < total - 1.0:
+                    devtools.ev("window.__capSkip ? window.__capSkip() : 0")
+                if stalls > 2 and resumes < RESUME_TRIES and not media.get("ended"):
+                    devtools.ev("window.__capResume ? window.__capResume() : 0")
+                    resumes += 1
+                if stalls > STALL_POLLS:
                     reason = "stalled"
                     break
                 if not quiet and written:
@@ -1393,9 +1447,7 @@ class Downloader:
     def capturer(self) -> Capture:
         if self.capture is None:
             auth = self.api.auth if self.api else None
-            if auth is None:
-                raise SunoError("this song needs a session for the capture", "NO_SESSION")
-            self.capture = Capture(auth.token(), quiet=self.args.quiet)
+            self.capture = Capture(auth.token() if auth else None, quiet=self.args.quiet)
         return self.capture
 
     # -- fetch a representable clip object ---------------------------------
@@ -1442,7 +1494,7 @@ class Downloader:
         urls = clip_audio_urls(clip)
         plain = bool(usable_url(clip.get("video_url")) or usable_url(clip.get("audio_url")))
         capture = not plain if self.args.capture is None else bool(self.args.capture)
-        if capture and not self.has_auth:
+        if capture and not plain and not self.has_auth:
             self._count("failed")
             return (
                 f"FAILED (NO_SESSION): {title}. This song only plays in the browser, so "
@@ -1504,7 +1556,7 @@ class Downloader:
 
             if fmt == "original" and not self.args.no_verify:
                 info = inspect_mp4(final)
-                want = played or clip_duration(clip)
+                want = clip_duration(clip) or played
                 bad = list(info["problems"])
                 if (
                     want
@@ -1517,7 +1569,7 @@ class Downloader:
                         final.unlink()
                     raise SunoError("verification failed: " + "; ".join(bad), "VERIFY")
                 # The player stream is fragmented, so mvhd holds no duration.
-                if capture and want and played and played < want - 1.0:
+                if capture and want and played + 1.0 < want:
                     with contextlib.suppress(OSError):
                         final.unlink()
                     raise SunoError(f"the player stopped at {played:.1f}s of {want:.1f}s", "VERIFY")

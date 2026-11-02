@@ -161,8 +161,11 @@ in `/api/billing/info/`), so its download button spends a limited resource.
 `suno-dl` never presses that button: public songs come from the CDN and private
 songs come out of the player, so a run costs no quota either way.
 
-A run needs Chrome and takes about as long as the song. `--no-capture` keeps the
-tool browser-free and skips those songs with `NO_SESSION` or `PRIVATE`.
+A run needs Chrome. The capture drives playback hard, so it finishes in roughly a
+tenth of the song's length: 20 seconds of audio lands in about three seconds and a
+four minute song in about twenty. `SUNO_DL_SPEED` sets the playback rate (default
+16, and values past 20 do not help). `--no-capture` keeps the tool browser-free and
+skips those songs with `NO_SESSION` or `PRIVATE`.
 
 ## Under the hood
 
@@ -180,6 +183,11 @@ For each song the tool:
 
 The capture path speaks DevTools over a socket the tool opens itself, so the file
 still pulls in no packages.
+
+Two things the capture does that a naive recording does not: it watches
+`buffered`, not the playhead, so it stops the moment the last byte is through
+instead of waiting the song out, and it jumps the playhead to the buffer edge and
+restarts a paused player, because the page only ever fills a short window ahead.
 
 Filenames follow `Artist - Title.ext`, sanitised for Windows, macOS and Linux,
 with ` (1)`, ` (2)` added on collisions.
