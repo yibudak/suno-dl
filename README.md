@@ -130,20 +130,21 @@ songs need a session.
 
 ### What it can and cannot fetch
 
-Suno publishes a plain MP4 only for songs that are public and downloadable on
-your plan. Private and unlisted songs have no such file: their only stream is the
-encrypted one Suno's player unlocks with a license key. The tool reports what it
-found instead of saving ciphertext.
+Suno publishes a plain MP4 for public clips. When a clip is private or unlisted,
+`video_url` comes back empty and the only entry in `media_urls` is encrypted for
+Suno's player, which unlocks it with a license key. The tool reports what it found
+instead of saving ciphertext.
 
 ```console
-FAILED (PRIVATE): <title>. Suno only serves private and unlisted songs through its
-encrypted player, so there is no plain file to download.
+FAILED (PRIVATE): <title>. Suno publishes a plain MP4 only for public clips, and
+this one is private. Its only stream is encrypted for Suno's player, so there is no
+file to fetch.
 ```
 
-If you want a copy of your own private song, publish it in Suno, run `suno-dl`,
-then set it back to private. When `/api/clip/{id}` reports
-`"is_download_unlocked": false`, your account or plan has downloads turned off.
-That is a Suno setting the tool cannot change.
+Suno bills downloads separately from generation credits (`download_credit_packs`
+in `/api/billing/info/`), so its download button spends a limited resource.
+`suno-dl` does not press that button. It fetches the plain MP4 that Suno publishes
+for public clips.
 
 ## Under the hood
 

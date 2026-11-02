@@ -598,9 +598,9 @@ def private_or_missing(clip: dict, title: str) -> str:
     """Say why the tool cannot fetch a song that has no plain media URL."""
     if clip.get("is_public") is False:
         return (
-            f"FAILED (PRIVATE): {title}. Suno only serves private and unlisted songs "
-            "through its encrypted player, so there is no plain file to download. "
-            "Publish the song (or use Suno's own download button) and run again."
+            f"FAILED (PRIVATE): {title}. Suno publishes a plain MP4 only for public "
+            "clips, and this one is private. Its only stream is encrypted for Suno's "
+            "player, so there is no file to fetch."
         )
     return f"FAILED (NO_MEDIA): {title}. No progressive MP4 is published for this song."
 
