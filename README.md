@@ -2,9 +2,9 @@
 
 # suno-dl
 
-**Your Suno library, on your disk, at original quality.**
+**Download the songs you made on Suno, at the quality Suno serves them.**
 
-One Python file. No browser, no dependencies, no ffmpeg unless you ask for it.
+The whole tool is one Python file that uses only the standard library.
 
 ![python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square)
 ![dependencies](https://img.shields.io/badge/dependencies-none-brightgreen?style=flat-square)
@@ -12,11 +12,10 @@ One Python file. No browser, no dependencies, no ffmpeg unless you ask for it.
 
 </div>
 
----
-
-`suno-dl` signs in with your own Suno session, lists the songs your account owns,
-and downloads the original MP4 — the same asset Suno's API hands out — then checks
-the file is intact before calling it done. Audio-only formats are one flag away.
+`suno-dl` signs in with your Suno session, lists the songs your account owns, and
+saves the original MP4. It reads the file back before reporting success, so a
+dropped connection fails the song instead of leaving a half file. Ask for mp3,
+flac, wav, opus or m4a and it runs the conversion through ffmpeg.
 
 ```console
 $ suno-dl --library
@@ -27,53 +26,53 @@ ok: Paper Planes.mp4 (8.2 MB)
 done: 3 downloaded, 0 skipped, 0 failed
 ```
 
-## Why this one
+## What you get
 
-- **One file, zero dependencies.** Standard library only. Copy `suno_dl.py`
-  anywhere and run it; nothing to install, nothing to break.
-- **Original quality.** No re-encoding by default — the MP4 exactly as served.
-- **It finishes what it starts.** HTTP Range resume, retries, and a structural
-  check of every file (box layout + duration) so a dropped connection never
-  leaves you with a half-song.
-- **It remembers.** A history file skips what you already have, and cover art
-  lands next to the audio.
-- **Parallel, scriptable.** `--jobs`, `--since`, `--list --json` for pipelines.
+- **The file Suno serves.** The default format copies the MP4 without re-encoding.
+- **Resume and verification.** A dropped download continues from the last byte,
+  and the tool inspects the MP4 boxes and duration before it marks the song done.
+- **A history file.** `~/.suno-dl/history.json` records what you downloaded, so
+  the next run skips those songs. Cover art lands beside the audio.
+- **Flags for scripts.** `--jobs` runs several downloads at once, `--since`
+  limits a run by date, and `--list --json` prints the queue without downloading.
 
 ## Install
 
 ```bash
-# 1. zero install: suno_dl.py is the whole tool — copy it anywhere and run it
+# run the file directly
 python3 suno_dl.py --library
 
-# 2. or install the command from a clone
+# or install the command from a clone
 pipx install .
 suno-dl --library
 ```
 
-Python 3.10+. No virtualenv, no build step, no dependencies.
+Python 3.10 or newer. The single file needs no virtualenv, no build step and no
+dependencies.
 
 ## Sign in
 
-Suno has no API keys, so `suno-dl` borrows the session your browser already
-holds. You copy one cookie out of DevTools — depending on your account you will
-see `__session`, `__client`, or both:
+Suno has no API keys, so `suno-dl` uses the session your browser already holds.
+Copy one cookie out of DevTools. Your account may show `__session`, `__client`,
+or both.
 
 | cookie | lives on | lifetime | what the tool does with it |
 |---|---|---|---|
-| `__session` | suno.com | minutes | sends it straight to the API as the bearer token |
-| `__client` | auth.suno.com | weeks | exchanges it for a fresh bearer token, again and again |
+| `__session` | suno.com | minutes | sends it to the API as the bearer token |
+| `__client` | auth.suno.com | weeks | exchanges it for a fresh bearer token on demand |
 
-### Fast path — only `__session`? That works
+### If you only have `__session`
 
-1. DevTools → **Application** → **Cookies** → `https://suno.com` → `__session`.
-2. Copy the value (a long `eyJ…` JWT) and pass it in:
+1. Open DevTools, then **Application**, then **Cookies**, then `https://suno.com`,
+   and copy `__session`.
+2. Put the JWT in an environment variable:
 
 ```bash
 export SUNO_SESSION='eyJhbGciOi…'
 suno-dl --check
 ```
 
-`--check` tells you who you are and how long the token has left:
+`--check` prints the account and the time left on the token.
 
 ```console
 $ suno-dl --check
@@ -82,15 +81,14 @@ ok: signed in as @yourhandle (Your Name)
     tip: re-copy __session when it runs out, or use __client for long runs
 ```
 
-The JWT lives for minutes, but it is only needed to **list** your songs — the
-files themselves come from the CDN, unauthenticated. A fresh token is therefore
-enough to start even a large library; if the listing itself outlives it, the tool
-says so instead of failing silently.
+The token lives for minutes. The tool needs it to list your songs; the CDN
+serves the audio itself without authentication. A fresh token therefore covers a
+large library. If the listing outlives the token, the tool stops and tells you to
+copy a new one.
 
-### Long runs — `__client`
+### Use `__client` when you have it
 
-If `https://auth.suno.com` has a `__client` cookie as well, use that one
-instead: it is long-lived and the tool mints fresh tokens from it on its own.
+`__client` lives for weeks, and the tool mints fresh tokens from it on its own.
 
 ```bash
 export SUNO_COOKIE='__client=eyJhbGciOi…'
@@ -98,17 +96,18 @@ suno-dl --check
 suno-dl --library
 ```
 
-A whole `Cookie:` header pasted into `--cookie` works too — `__session` and
-`__client` are picked out of it automatically.
+You can also paste a whole `Cookie:` header into `--cookie`, and the tool picks
+`__session` and `__client` out of it.
 
-Either way, treat the value like a password: it opens your whole library. Keep
-it in a secret manager or an env var, not in shell history.
+Treat either value like a password: it opens your library. Keep it in a secret
+manager or an environment variable.
 
 ## Use it
 
 ```bash
 suno-dl --library                        # everything you own
 suno-dl https://suno.com/song/<uuid>     # one song
+suno-dl https://suno.com/s/<code>        # a share link
 suno-dl https://suno.com/playlist/<id>   # a playlist
 suno-dl https://suno.com/@yourhandle     # a profile
 suno-dl --library --list                 # look first, download later
@@ -117,49 +116,49 @@ suno-dl --library --dry-run              # show the plan, touch nothing
 
 | flag | what it does |
 |---|---|
-| `-f, --format` | `original` (default) · `mp3` · `m4a` · `flac` · `wav` · `opus` |
-| `-b, --bitrate` | kbps for mp3/m4a/opus — 320 is the default |
+| `-f, --format` | `original` (default), `mp3`, `m4a`, `flac`, `wav`, `opus` |
+| `-b, --bitrate` | kbps for mp3, m4a and opus (default 320) |
 | `-j, --jobs` | parallel downloads (default 3) |
 | `-n, --limit` | stop after N songs |
 | `--since YYYY-MM-DD` | only songs created from that date |
 | `-o, --out` | output folder (default `~/Music/Suno`) |
-| `--force` | re-download even if history says you have it |
-| `--no-cover` | skip the sidecar artwork |
+| `--force` | download again even when history says you have it |
+| `--no-cover` | skip the artwork file |
 
 Public songs, playlists and profiles work without a cookie. Private and unlisted
-songs need `--library` with your session.
+songs need a session.
 
-### What it can — and cannot — fetch
+### What it can and cannot fetch
 
-Suno publishes a plain MP4 only for songs that are **public** and downloadable on
-your plan. A private or unlisted song has no such file: its only stream is the
-encrypted one Suno's player unlocks with a license key. The tool says so instead
-of saving ciphertext:
+Suno publishes a plain MP4 only for songs that are public and downloadable on
+your plan. Private and unlisted songs have no such file: their only stream is the
+encrypted one Suno's player unlocks with a license key. The tool reports what it
+found instead of saving ciphertext.
 
 ```console
-FAILED (PRIVATE): <title> — Suno only serves private/unlisted songs through its
+FAILED (PRIVATE): <title>. Suno only serves private and unlisted songs through its
 encrypted player, so there is no plain file to download.
 ```
 
-Want a copy of your own private song? Publish it in Suno, run `suno-dl`, then
-flip it back to private. If `/api/clip/{id}` reports `"is_download_unlocked":
-false`, downloads are not enabled for that account/plan at all — that is a Suno
-setting, not something this tool can change.
+If you want a copy of your own private song, publish it in Suno, run `suno-dl`,
+then set it back to private. When `/api/clip/{id}` reports
+`"is_download_unlocked": false`, your account or plan has downloads turned off.
+That is a Suno setting the tool cannot change.
 
 ## Under the hood
 
 For each song the tool:
 
-1. asks `/api/clip/{id}` for title, artist, duration, artwork and media URL;
-2. picks the first candidate that answers with real media, preferring the CDN MP4;
+1. asks `/api/clip/{id}` for the title, artist, duration, artwork and media URL;
+2. picks the first candidate that returns real media, preferring the CDN MP4;
 3. downloads it with `Range`, resuming a `.part` file after a dropped connection;
-4. verifies the container — `ftyp` first, exactly one `moov`, no truncated box,
-   payload size and duration consistent with the API;
+4. inspects the container: `ftyp` first, one `moov`, no truncated box, and a
+   duration that matches the API;
 5. writes the cover beside the audio and records the song in
    `~/.suno-dl/history.json`.
 
-Names follow `Artist - Title.ext`, sanitised for Windows, macOS and Linux, with
-` (1)`, ` (2)` on collisions.
+Filenames follow `Artist - Title.ext`, sanitised for Windows, macOS and Linux,
+with ` (1)`, ` (2)` added on collisions.
 
 ## Development
 
@@ -168,23 +167,23 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 pre-commit install --hook-type pre-commit --hook-type pre-push
-pytest                      # 90 tests, no network
+pytest                      # 96 tests, no network
 ruff check . && ruff format --check .
 mypy suno_dl.py
 ```
 
-CI runs lint, types, the test suite on Python 3.10–3.14 across Linux, macOS and
-Windows, plus a wheel build that installs and runs `suno-dl --version`.
-Tagging `v*.*.*` builds the release, attaches it to a GitHub Release and
-publishes to PyPI through trusted publishing.
+CI runs the linters and the test suite on Python 3.10 through 3.14 across Linux,
+macOS and Windows. It also builds a wheel, installs it, and runs `suno-dl
+--version`. Pushing a `v*.*.*` tag builds the release, attaches it to a GitHub
+Release, and publishes to PyPI through trusted publishing.
 
 ## Fair use
 
-This tool authenticates as **you** and downloads what your account can already
+The tool authenticates as **you** and downloads what your account can already
 play. Download your own work, or work you have the right to keep. It does not
 bypass any protection and does not touch Suno's encrypted stream. Respect the
 platform's terms and the artists.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

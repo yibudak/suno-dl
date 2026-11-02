@@ -24,7 +24,7 @@ def test_parse_cookies_accepts_a_header():
 
 def test_parse_cookies_accepts_a_bare_token():
     token = make_jwt(int(time.time()) + 600)
-    # a bare JWT is almost always the short-lived __session, not __client
+    # a bare JWT is the __session token
     assert parse_cookies(token) == {"__session": token}
 
 

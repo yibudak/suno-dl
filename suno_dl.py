@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""suno_dl — download your own Suno songs at original quality.
+"""Download your own Suno songs at original quality.
 
-A single file, standard library only: no browser, no third-party packages, and
-no ffmpeg unless you ask for a converted format.
+The tool is a single file and uses only the standard library. It needs no
+browser, and no ffmpeg unless you convert.
 
-Authentication uses the same short-lived token flow as the suno.com web app: a
-`__client` cookie is exchanged for a JWT, which is then sent as a bearer token.
+Authentication follows the suno.com web app: the tool sends a `__session` JWT
+directly, or exchanges a `__client` cookie for one and refreshes it as needed.
 
 Only download content you own or have the right to use.
 """
@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # --------------------------------------------------------------------------
-# Constants — every one of these was observed in Suno's own web client.
+# Every constant here came from Suno's web client.
 # --------------------------------------------------------------------------
 
 API_BASE = "https://studio-api-prod.suno.com"  # what suno.com's own client calls
@@ -216,7 +216,7 @@ def parse_cookies(raw: str) -> dict[str, str]:
     if not raw:
         return out
     if "=" not in raw and looks_like_jwt(raw):
-        # A bare token: almost always the short-lived __session JWT.
+        # A bare token is the __session JWT.
         out["__session"] = raw
         return out
     for part in raw.split(";"):
@@ -234,7 +234,7 @@ def parse_cookies(raw: str) -> dict[str, str]:
 # --------------------------------------------------------------------------
 # Authentication
 #
-# Two shapes of credential, both just a bearer token in the end:
+# Two shapes of credential, both a bearer token in the end:
 #   __session  a ready JWT from suno.com, valid for minutes
 #   __client   a long-lived Clerk cookie, exchanged for a JWT on demand
 # --------------------------------------------------------------------------
@@ -271,10 +271,10 @@ class Auth:
         if not self.client_token and not self._jwt:
             if self.session_token:
                 raise AuthError(
-                    f"Your __session token {self.describe_expiry()}. Copy a fresh one from "
-                    "DevTools -> Application -> Cookies -> suno.com -> __session and run "
-                    "again right away (it only lives for minutes). If you also have a "
-                    "__client cookie, pass that instead — the tool then refreshes itself.",
+                    f"Your __session token {self.describe_expiry()}. Copy a fresh one "
+                    "from DevTools -> Application -> Cookies -> suno.com -> __session and "
+                    "run again (it lives for minutes). If you also have a __client cookie, "
+                    "pass that: the tool then refreshes itself.",
                     "SESSION_EXPIRED",
                 )
             raise AuthError(
@@ -349,9 +349,9 @@ class Auth:
                     "gets exchanged for it."
                 )
             raise AuthError(
-                "Clerk returned no sessions for this __client token — it is expired or "
-                "was copied from another profile. Log out and back in on suno.com, then "
-                "copy __client again." + hint,
+                "Clerk returned no sessions for this __client token. It has expired or "
+                "came from another profile. Log out and back in on suno.com, then copy "
+                "__client again." + hint,
                 "NO_SESSION",
             )
         active = [s for s in sessions if s.get("status") == "active"] or sessions
@@ -394,7 +394,7 @@ class Auth:
 
 
 def rejected_session(error: HttpError) -> SunoError:
-    """A 401 from the API almost always means the copied token has gone stale."""
+    """A 401 from the API means the copied token has expired."""
     if error.status != 401:
         return error
     return AuthError(
@@ -575,9 +575,9 @@ def usable_url(url: str | None) -> str | None:
 def clip_audio_urls(clip: dict) -> list[str]:
     """Ordered candidates for the plain media file, best first.
 
-    `media_urls` is deliberately not a candidate: that stream is encrypted for
-    Suno's player (license server + AES-GCM), so a plain fetch only yields
-    ciphertext. Only the progressive MP4 is a real file.
+    `media_urls` never becomes a candidate: that stream is encrypted for Suno's
+    player (license server, AES-GCM), so a plain fetch returns ciphertext. The
+    progressive MP4 is the real file.
     """
     urls: list[str] = []
 
@@ -595,14 +595,14 @@ def clip_audio_urls(clip: dict) -> list[str]:
 
 
 def private_or_missing(clip: dict, title: str) -> str:
-    """Explain why a song with no plain media URL cannot be fetched."""
+    """Say why the tool cannot fetch a song that has no plain media URL."""
     if clip.get("is_public") is False:
         return (
-            f"FAILED (PRIVATE): {title} — Suno only serves private/unlisted songs "
+            f"FAILED (PRIVATE): {title}. Suno only serves private and unlisted songs "
             "through its encrypted player, so there is no plain file to download. "
             "Publish the song (or use Suno's own download button) and run again."
         )
-    return f"FAILED (NO_MEDIA): {title} — no progressive MP4 is published for this song."
+    return f"FAILED (NO_MEDIA): {title}. No progressive MP4 is published for this song."
 
 
 def clip_cover_url(clip: dict) -> str | None:
@@ -610,7 +610,7 @@ def clip_cover_url(clip: dict) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# MP4 inspection — never mark a song done unless the container is intact
+# MP4 inspection: check the container before marking a song done
 # --------------------------------------------------------------------------
 
 
@@ -760,7 +760,7 @@ def target_path(out_dir: Path, clip: dict, ext: str) -> Path:
 
 
 # --------------------------------------------------------------------------
-# History — skip what is already on disk
+# History: skip what is already on disk
 # --------------------------------------------------------------------------
 
 
@@ -1012,7 +1012,7 @@ class Downloader:
             self._count("skipped")
             where = previous.get("path") or ""
             if where and Path(where).parent != self.out_dir:
-                return f"have ({ext}): {title}  — already at {where}"
+                return f"have ({ext}): {title} (at {where})"
             return f"have ({ext}): {title}"
 
         urls = clip_audio_urls(clip)
@@ -1088,17 +1088,17 @@ class Downloader:
                 with contextlib.suppress(OSError):
                     dest.unlink()
             self._count("failed")
-            return f"FAILED ({e.code}): {title} — {e}"
+            return f"FAILED ({e.code}): {title}. {e}"
         except Exception as e:
             self._count("failed")
-            return f"FAILED: {title} — {type(e).__name__}: {e}"
+            return f"FAILED: {title}. {type(e).__name__}: {e}"
         finally:
             if tmp_src and tmp_src.exists():
                 with contextlib.suppress(OSError):
                     tmp_src.unlink()
 
     def _pick_source(self, urls: list[str], clip: dict) -> tuple[str, int | None]:
-        """Return the first candidate URL that actually serves bytes."""
+        """Return the first candidate URL that serves bytes."""
         last: SunoError | None = None
         for url in urls:
             if "/api/forbidden" in url:
@@ -1256,7 +1256,7 @@ def list_library(api: SunoAPI, limit: int, verbose: bool = True) -> tuple[list[d
         errors.append(f"{label}: returned nothing")
 
     raise SunoError(
-        "could not list your library — all endpoints came back empty:\n  " + "\n  ".join(errors),
+        "could not list your library. Every endpoint came back empty:\n  " + "\n  ".join(errors),
         "NO_LIBRARY",
     )
 
@@ -1312,7 +1312,8 @@ examples:
   suno-dl https://suno.com/@yourhandle     a profile
   suno-dl --library -f mp3 -b 320 -j 4     convert while downloading
 
-Get the cookie: suno.com -> DevTools -> Application -> Cookies -> auth.suno.com -> __client
+Get the cookie: DevTools -> Application -> Cookies -> suno.com (__session)
+                 or auth.suno.com (__client)
 """
 
 
@@ -1458,7 +1459,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.cookie and not args.session and (args.library or args.check):
         # Public songs, playlists and profiles work without a token; a library needs one.
         log(
-            "error: this needs a session — pass --session with your __session JWT, "
+            "error: this needs a session. Pass --session with your __session JWT, "
             "or --cookie with a __client cookie"
         )
         return 2
@@ -1546,7 +1547,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 line = fut.result()
             except Exception as e:
-                line = f"FAILED: {clip_title(clip)} — {e}"
+                line = f"FAILED: {clip_title(clip)}. {e}"
             if "FAILED" in line:
                 failures += 1
             print(line, flush=True)
