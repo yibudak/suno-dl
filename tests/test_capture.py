@@ -422,6 +422,24 @@ def test_capture_stops_the_browser(monkeypatch):
     assert capture.proc is None
 
 
+def test_stop_removes_the_run_profile(tmp_path: Path):
+    capture = _capture()
+    profile = tmp_path / "browser-x"
+    profile.mkdir()
+    capture.profile = profile
+
+    class Proc:
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    capture.proc = Proc()
+    capture.stop()
+    assert not profile.exists()
+
+
 def test_stop_is_safe_before_start():
     _capture().stop()
     time.sleep(0)

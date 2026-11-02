@@ -29,6 +29,7 @@ import ssl
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1255,6 +1256,8 @@ class Capture:
         self.lock = threading.Lock()
         self.proc: subprocess.Popen | None = None
         self.devtools: DevTools | None = None
+        self.profile: Path | None = None
+        self.log = STATE_DIR / "browser.log"
 
     def _start(self) -> DevTools:
         if self.devtools is not None:
@@ -1268,14 +1271,18 @@ class Capture:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
-        profile = STATE_DIR / "browser"
-        profile.mkdir(parents=True, exist_ok=True)
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        # A profile per run: two launches on one profile hand off to each other
+        # and the second one never opens a port.
+        self.profile = Path(tempfile.mkdtemp(prefix="browser-", dir=STATE_DIR))
+        self.log = STATE_DIR / "browser.log"
+        handle = self.log.open("wb")
         self.proc = subprocess.Popen(
             [
                 exe,
                 "--headless=new",
                 f"--remote-debugging-port={port}",
-                f"--user-data-dir={profile}",
+                f"--user-data-dir={self.profile}",
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--disable-gpu",
@@ -1285,11 +1292,14 @@ class Capture:
                 "about:blank",
             ],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=handle,
         )
+        handle.close()
         deadline = time.monotonic() + 30
         ws_url = None
         while time.monotonic() < deadline:
+            if self.proc.poll() is not None:
+                raise SunoError(f"the browser exited at once: {self._log_tail()}", "BROWSER")
             try:
                 with urllib.request.urlopen(
                     f"http://127.0.0.1:{port}/json/version", timeout=2
@@ -1300,7 +1310,9 @@ class Capture:
             except (OSError, ValueError):
                 time.sleep(0.2)
         if not ws_url:
-            raise SunoError("the browser did not open a DevTools port", "BROWSER")
+            raise SunoError(
+                f"the browser did not open a DevTools port: {self._log_tail()}", "BROWSER"
+            )
         devtools = DevTools(ws_url)
         devtools.attach()
         for method in ("Page.enable", "Network.enable", "Runtime.enable"):
@@ -1322,6 +1334,12 @@ class Capture:
         self.devtools = devtools
         return devtools
 
+    def _log_tail(self) -> str:
+        with contextlib.suppress(OSError):
+            lines = [ln for ln in self.log.read_text("utf-8", "replace").splitlines() if ln.strip()]
+            return " / ".join(lines[-3:])[:300] or "no output"
+        return "no log"
+
     def stop(self) -> None:
         if self.devtools is not None:
             with contextlib.suppress(OSError):
@@ -1332,6 +1350,9 @@ class Capture:
             with contextlib.suppress(subprocess.TimeoutExpired, OSError):
                 self.proc.wait(timeout=5)
             self.proc = None
+        if self.profile is not None:
+            shutil.rmtree(self.profile, ignore_errors=True)
+            self.profile = None
 
     def fetch(self, clip: dict, dest: Path, duration: float, quiet: bool = False) -> dict:
         with self.lock:
