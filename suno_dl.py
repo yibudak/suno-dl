@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Download your own Suno songs at original quality.
 
-The tool is a single file and uses only the standard library. It needs no
-browser, and no ffmpeg unless you convert.
+The tool is a single file and uses only the standard library. Public songs come
+straight from the CDN. Songs Suno only serves to its player (every private clip)
+are captured from the player: the tool drives a headless Chrome, reads the
+decrypted audio as the page feeds it to the audio pipeline, and writes the
+result. Without Chrome those songs cannot be fetched. ffmpeg is only needed to
+convert.
 
 Authentication follows the suno.com web app: the tool sends a `__session` JWT
 directly, or exchanges a `__client` cookie for one and refreshes it as needed.
@@ -20,6 +24,8 @@ import json
 import os
 import re
 import shutil
+import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -51,7 +57,7 @@ UA = (
 STATE_DIR = Path(os.environ.get("SUNO_STATE_DIR", Path.home() / ".suno-dl"))
 HISTORY_FILE = STATE_DIR / "history.json"
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 JWT_REFRESH_MARGIN = 120  # seconds before expiry to re-mint
 
@@ -577,7 +583,8 @@ def clip_audio_urls(clip: dict) -> list[str]:
 
     `media_urls` never becomes a candidate: that stream is encrypted for Suno's
     player (license server, AES-GCM), so a plain fetch returns ciphertext. The
-    progressive MP4 is the real file.
+    progressive MP4 is the real file. A private clip has neither, which is what
+    sends the song to the browser capture.
     """
     urls: list[str] = []
 
@@ -599,8 +606,8 @@ def private_or_missing(clip: dict, title: str) -> str:
     if clip.get("is_public") is False:
         return (
             f"FAILED (PRIVATE): {title}. Suno publishes a plain MP4 only for public "
-            "clips, and this one is private. Its only stream is encrypted for Suno's "
-            "player, so there is no file to fetch."
+            "clips. This one is private and the browser capture is switched off, so "
+            "there is no file to fetch."
         )
     return f"FAILED (NO_MEDIA): {title}. No progressive MP4 is published for this song."
 
@@ -956,6 +963,418 @@ def convert_file(src: Path, dest: Path, fmt: str, bitrate: int | None, clip: dic
 
 
 # --------------------------------------------------------------------------
+# Browser capture
+#
+# Private clips have no plain file. The only stream is an encrypted MP4 that
+# Suno's own page decrypts before it reaches the audio pipeline, so the bytes
+# exist in the clear for exactly as long as the page is playing. The capture
+# below sits in that window: it patches MediaSource in the page, lets the page
+# fetch and decrypt, and reads each buffer on the way to the decoder.
+# --------------------------------------------------------------------------
+
+BROWSER_CANDIDATES = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/snap/bin/chromium",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+)
+
+# Runs in the page before the app does. Every SourceBuffer holds the decrypted
+# stream, so a copy at appendBuffer is a copy of the real audio.
+CAPTURE_JS = r"""
+(() => {
+  const state = { chunks: [], sizes: [], sources: 0, dropped: 0, errors: [] };
+  const append = SourceBuffer.prototype.appendBuffer;
+  const add = MediaSource.prototype.addSourceBuffer;
+  MediaSource.prototype.addSourceBuffer = function (...args) {
+    state.sources++;
+    return add.apply(this, args);
+  };
+  SourceBuffer.prototype.appendBuffer = function (buf) {
+    try {
+      const view = ArrayBuffer.isView(buf)
+        ? new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength)
+        : new Uint8Array(buf);
+      if (state.chunks.length < 100000) {
+        state.chunks.push(view.slice());
+        state.sizes.push(view.byteLength);
+      } else state.dropped++;
+    } catch (e) { state.errors.push(String(e)); }
+    return append.apply(this, arguments);
+  };
+  window.__capStatus = () => ({
+    bytes: state.sizes.reduce((a, b) => a + b, 0),
+    sources: state.sources,
+    dropped: state.dropped,
+    errors: state.errors.slice(0, 5),
+  });
+  window.__capDrain = (max) => {
+    const take = Math.min(max, state.chunks.length);
+    const out = [];
+    let bytes = 0;
+    for (let i = 0; i < take; i++) {
+      const chunk = state.chunks[i];
+      let raw = '';
+      for (let j = 0; j < chunk.byteLength; j += 8192) {
+        raw += String.fromCharCode.apply(null, chunk.subarray(j, Math.min(j + 8192, chunk.byteLength)));
+      }
+      out.push(btoa(raw));
+      bytes += chunk.byteLength;
+    }
+    state.chunks.splice(0, take);
+    return { b64: out, bytes };
+  };
+  window.__capMedia = () => {
+    const media = document.querySelector('audio, video');
+    return media
+      ? { t: media.currentTime, d: media.duration, ended: media.ended, paused: media.paused }
+      : null;
+  };
+  window.__capPlay = () => {
+    const label = (el) => el.getAttribute('aria-label') || el.title || '';
+    const button = Array.from(document.querySelectorAll('button')).find((b) => /^play/i.test(label(b)));
+    if (button) { button.click(); return 'button'; }
+    const media = document.querySelector('audio, video');
+    if (media) { media.play(); return 'element'; }
+    return 'none';
+  };
+})();
+"""
+
+PLAY_POLL = 0.5  # seconds between page readiness polls
+DRAIN_POLL = 0.5  # seconds between drains
+MAX_MEDIA_BYTES = 128 * 1048576
+STALL_POLLS = 24  # 12 seconds without a new byte
+MIN_MEDIA_BYTES = 4096  # anything shorter is a broken capture, not a song
+
+
+def find_browser() -> str | None:
+    override = os.environ.get("SUNO_DL_BROWSER")
+    if override:
+        return override
+    for path in BROWSER_CANDIDATES:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    for name in ("google-chrome", "chromium", "chrome", "msedge", "brave"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+class _Frame:
+    """Send and receive WebSocket text frames over one socket."""
+
+    def __init__(self, url: str, timeout: float = 60.0) -> None:
+        url = url.replace("ws://", "http://", 1).replace("wss://", "https://", 1)
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or "127.0.0.1"
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        raw = socket.create_connection((host, port), timeout=timeout)
+        if parts.scheme == "https":
+            raw = ssl.create_default_context().wrap_socket(raw, server_hostname=host)
+        self.sock = raw
+        self.buffer = b""
+        key = base64.b64encode(os.urandom(16)).decode()
+        path = parts.path + (f"?{parts.query}" if parts.query else "")
+        handshake = (
+            f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
+            f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        self.sock.sendall(handshake.encode())
+        head = self._read_until(b"\r\n\r\n").decode("latin-1")
+        if " 101 " not in head.split("\r\n")[0]:
+            raise SunoError(f"DevTools refused the socket: {head.splitlines()[:1]}", "BROWSER")
+
+    def _read_until(self, marker: bytes) -> bytes:
+        while marker not in self.buffer:
+            block = self.sock.recv(65536)
+            if not block:
+                raise SunoError("browser closed the DevTools socket", "BROWSER")
+            self.buffer += block
+        head, _, self.buffer = self.buffer.partition(marker)
+        return head + marker
+
+    def _read_exact(self, count: int) -> bytes:
+        while len(self.buffer) < count:
+            block = self.sock.recv(max(65536, count - len(self.buffer)))
+            if not block:
+                raise SunoError("browser closed the DevTools socket", "BROWSER")
+            self.buffer += block
+        out, self.buffer = self.buffer[:count], self.buffer[count:]
+        return out
+
+    def send(self, text: str) -> None:
+        payload = text.encode()
+        header = bytearray([0x81])
+        size = len(payload)
+        if size < 126:
+            header.append(0x80 | size)
+        elif size < 65536:
+            header.append(0x80 | 126)
+            header += struct.pack(">H", size)
+        else:
+            header.append(0x80 | 127)
+            header += struct.pack(">Q", size)
+        mask = os.urandom(4)
+        header += mask
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self.sock.sendall(bytes(header) + masked)
+
+    def recv(self, timeout: float = 60.0) -> str | None:
+        self.sock.settimeout(timeout)
+        parts: list[bytes] = []
+        while True:
+            first, second = self._read_exact(2)
+            opcode = first & 0x0F
+            size = second & 0x7F
+            if size == 126:
+                size = struct.unpack(">H", self._read_exact(2))[0]
+            elif size == 127:
+                size = struct.unpack(">Q", self._read_exact(8))[0]
+            data = self._read_exact(size) if size else b""
+            if opcode == 0x8:
+                return None
+            if opcode == 0x9:
+                self.sock.sendall(bytes([0x8A, 0x80 | len(data)]) + os.urandom(4) + data)
+                continue
+            if opcode == 0xA:
+                continue
+            parts.append(data)
+            if first & 0x80:
+                return b"".join(parts).decode("utf-8", "replace")
+
+    def close(self) -> None:
+        with contextlib.suppress(OSError):
+            self.sock.sendall(bytes([0x8A, 0x80]))
+        with contextlib.suppress(OSError):
+            self.sock.close()
+
+
+class DevTools:
+    """The slice of the DevTools protocol the capture needs."""
+
+    def __init__(self, ws_url: str) -> None:
+        self.frame = _Frame(ws_url)
+        self.counter = 0
+        self.session: str | None = None
+
+    def call(self, method: str, params: dict | None = None, timeout: float = 60.0):
+        self.counter += 1
+        ident = self.counter
+        message = {"id": ident, "method": method, "params": params or {}}
+        if self.session:
+            message["sessionId"] = self.session
+        self.frame.send(json.dumps(message))
+        while True:
+            raw = self.frame.recv(timeout=timeout)
+            if raw is None:
+                raise SunoError("browser closed the DevTools socket", "BROWSER")
+            event = json.loads(raw)
+            if event.get("id") != ident:
+                continue
+            if event.get("error"):
+                raise SunoError(f"{method}: {event['error'].get('message')}", "BROWSER")
+            return event.get("result") or {}
+
+    def attach(self) -> None:
+        targets = self.call("Target.getTargets").get("targetInfos") or []
+        page = next((t for t in targets if t.get("type") == "page"), None)
+        target_id = (
+            page["targetId"]
+            if page
+            else self.call("Target.createTarget", {"url": "about:blank"})["targetId"]
+        )
+        attached = self.call("Target.attachToTarget", {"targetId": target_id, "flatten": True})
+        self.session = attached["sessionId"]
+
+    def ev(self, expression: str, timeout: float = 60.0):
+        result = self.call(
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "returnByValue": True,
+                "awaitPromise": True,
+                "userGesture": True,
+            },
+            timeout=timeout,
+        )
+        return (result.get("result") or {}).get("value")
+
+    def close(self) -> None:
+        self.frame.close()
+
+
+class Capture:
+    """One browser for the whole run, one song at a time."""
+
+    def __init__(self, token: str, quiet: bool = False) -> None:
+        self.token = token
+        self.quiet = quiet
+        self.lock = threading.Lock()
+        self.proc: subprocess.Popen | None = None
+        self.devtools: DevTools | None = None
+
+    def _start(self) -> DevTools:
+        if self.devtools is not None:
+            return self.devtools
+        exe = find_browser()
+        if not exe:
+            raise SunoError(
+                "no Chrome or Chromium found. Install one, or point SUNO_DL_BROWSER at it",
+                "NO_BROWSER",
+            )
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        profile = STATE_DIR / "browser"
+        profile.mkdir(parents=True, exist_ok=True)
+        self.proc = subprocess.Popen(
+            [
+                exe,
+                "--headless=new",
+                f"--remote-debugging-port={port}",
+                f"--user-data-dir={profile}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-gpu",
+                "--mute-audio",
+                "--autoplay-policy=no-user-gesture-required",
+                "--window-size=1280,900",
+                "about:blank",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + 30
+        ws_url = None
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/json/version", timeout=2
+                ) as answer:
+                    ws_url = json.load(answer).get("webSocketDebuggerUrl")
+                if ws_url:
+                    break
+            except (OSError, ValueError):
+                time.sleep(0.2)
+        if not ws_url:
+            raise SunoError("the browser did not open a DevTools port", "BROWSER")
+        devtools = DevTools(ws_url)
+        devtools.attach()
+        for method in ("Page.enable", "Network.enable", "Runtime.enable"):
+            devtools.call(method)
+        devtools.call(
+            "Network.setCookie",
+            {
+                "name": "__session",
+                "value": self.token,
+                "domain": ".suno.com",
+                "path": "/",
+                "secure": True,
+                "httpOnly": True,
+                "sameSite": "Lax",
+            },
+        )
+        devtools.call("Page.addScriptToEvaluateOnNewDocument", {"source": CAPTURE_JS})
+        self.devtools = devtools
+        return devtools
+
+    def stop(self) -> None:
+        if self.devtools is not None:
+            with contextlib.suppress(OSError):
+                self.devtools.close()
+            self.devtools = None
+        if self.proc is not None:
+            self.proc.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+                self.proc.wait(timeout=5)
+            self.proc = None
+
+    def fetch(self, clip: dict, dest: Path, duration: float, quiet: bool = False) -> dict:
+        with self.lock:
+            devtools = self._start()
+            try:
+                return self._fetch(devtools, str(clip.get("id")), dest, duration, quiet)
+            except SunoError:
+                self.stop()  # a broken page should not poison the next song
+                raise
+
+    def _fetch(
+        self, devtools: DevTools, clip_id: str, dest: Path, duration: float, quiet: bool
+    ) -> dict:
+        devtools.call("Page.navigate", {"url": f"https://suno.com/song/{clip_id}"})
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            if devtools.ev("!!document.querySelector('audio, video')"):
+                devtools.ev("window.__capRate ? window.__capRate(1) : 0")
+                devtools.ev("window.__capPlay ? window.__capPlay() : 'none'")
+            if (devtools.ev("window.__capStatus ? window.__capStatus() : null") or {}).get("bytes"):
+                break
+        started = time.monotonic()
+        deadline = started + max(120.0, (duration or 240.0) * 3 + 120)
+        written = 0
+        stalls = 0
+        last = 0
+        reason = "timeout"
+        with dest.open("wb") as out:
+            while time.monotonic() < deadline:
+                time.sleep(DRAIN_POLL)
+                dump = (
+                    devtools.ev("window.__capDrain ? window.__capDrain(400) : null", timeout=120)
+                    or {}
+                )
+                for blob in dump.get("b64") or []:
+                    data = base64.b64decode(blob)
+                    out.write(data)
+                    written += len(data)
+                if written > MAX_MEDIA_BYTES:
+                    reason = "size"
+                    break
+                media = devtools.ev("window.__capMedia ? window.__capMedia() : null") or {}
+                played = float(media.get("t") or 0)
+                total = float(media.get("d") or duration or 0)
+                if media.get("ended"):
+                    reason = "ended"
+                    break
+                if total and played >= total - 0.35:
+                    reason = "duration"
+                    break
+                stalls = stalls + 1 if written == last else 0
+                last = written
+                if stalls > STALL_POLLS and played > 1:
+                    reason = "stalled"
+                    break
+                if not quiet and written:
+                    share = f"{played / total * 100:3.0f}%" if total else "   "
+                    print(f"\r  capture {written / 1048576:5.1f} MB {share}", end="", flush=True)
+        if not quiet and written:
+            print("\r" + " " * 32 + "\r", end="", flush=True)
+        stats = devtools.ev("window.__capStatus ? window.__capStatus() : null") or {}
+        media = devtools.ev("window.__capMedia ? window.__capMedia() : null") or {}
+        return {
+            "reason": reason,
+            "bytes": written,
+            "duration": float(media.get("d") or duration or 0),
+            "dropped": stats.get("dropped", 0),
+            "errors": stats.get("errors") or [],
+            "page": devtools.ev(
+                "location.pathname + ' ' + (document.body.innerText || '').slice(0, 120)"
+            ),
+        }
+
+
+# --------------------------------------------------------------------------
 # Per-clip pipeline
 # --------------------------------------------------------------------------
 
@@ -968,6 +1387,16 @@ class Downloader:
         self.out_dir = Path(args.out).expanduser()
         self.lock = threading.Lock()
         self.counts = {"ok": 0, "skipped": 0, "failed": 0}
+        self.capture: Capture | None = None
+        self.has_auth = api is not None and api.auth is not None
+
+    def capturer(self) -> Capture:
+        if self.capture is None:
+            auth = self.api.auth if self.api else None
+            if auth is None:
+                raise SunoError("this song needs a session for the capture", "NO_SESSION")
+            self.capture = Capture(auth.token(), quiet=self.args.quiet)
+        return self.capture
 
     # -- fetch a representable clip object ---------------------------------
 
@@ -998,11 +1427,6 @@ class Downloader:
             self._count("skipped")
             return f"skip ({status}): {title}"
 
-        # A private clip has no plain file: its only media is the DRM stream.
-        if clip.get("is_public") is False and not usable_url(clip.get("video_url")):
-            self._count("failed")
-            return private_or_missing(clip, title)
-
         fmt = self.args.format
         ext = FORMATS[fmt][0]
         history_key = f"{clip_id}:{ext}"
@@ -1016,12 +1440,22 @@ class Downloader:
             return f"have ({ext}): {title}"
 
         urls = clip_audio_urls(clip)
-        if not urls:
+        plain = bool(usable_url(clip.get("video_url")) or usable_url(clip.get("audio_url")))
+        capture = not plain if self.args.capture is None else bool(self.args.capture)
+        if capture and not self.has_auth:
+            self._count("failed")
+            return (
+                f"FAILED (NO_SESSION): {title}. This song only plays in the browser, so "
+                "the capture needs --session or --cookie"
+            )
+        if not capture and not plain:
             self._count("failed")
             return private_or_missing(clip, title)
 
         if self.args.dry_run:
             self._count("ok")
+            if capture:
+                return f"would capture ({ext}): {title}"
             return f"would download ({ext}): {title}  <- {short_url(urls[0])}"
 
         dest = target_path(self.out_dir, clip, ext)
@@ -1032,13 +1466,33 @@ class Downloader:
         elif not self.args.overwrite:
             dest = unique_path(dest)
 
+        played = 0.0
         tmp_src: Path | None = None
         try:
-            source_url, size = self._pick_source(urls, clip)
-            if fmt == "original":
+            if capture:
+                tmp_src = self.out_dir / f".{clip_id}.source.mp4"
+                stats = self.capturer().fetch(
+                    clip, tmp_src, clip_duration(clip), quiet=self.args.quiet
+                )
+                played = stats["duration"]
+                if stats["bytes"] < MIN_MEDIA_BYTES:
+                    raise SunoError(
+                        f"the player gave back {stats['bytes']} bytes ({stats['reason']}): "
+                        f"{stats.get('page', '')[:120]}",
+                        "CAPTURE",
+                    )
+                if fmt == "original":
+                    final = dest
+                    shutil.move(str(tmp_src), str(dest))
+                else:
+                    convert_file(tmp_src, dest, fmt, self.args.bitrate, clip)
+                    final = dest
+            elif fmt == "original":
+                source_url, size = self._pick_source(urls, clip)
                 final = dest
                 download_file(source_url, final, expected=size, quiet=self.args.quiet)
             else:
+                source_url, size = self._pick_source(urls, clip)
                 tmp_src = self.out_dir / f".{clip_id}.source.mp4"
                 download_file(source_url, tmp_src, expected=size, quiet=self.args.quiet)
                 convert_file(tmp_src, dest, fmt, self.args.bitrate, clip)
@@ -1046,7 +1500,7 @@ class Downloader:
 
             if fmt == "original" and not self.args.no_verify:
                 info = inspect_mp4(final)
-                want = clip_duration(clip)
+                want = played or clip_duration(clip)
                 bad = list(info["problems"])
                 if (
                     want
@@ -1058,6 +1512,11 @@ class Downloader:
                     with contextlib.suppress(OSError):
                         final.unlink()
                     raise SunoError("verification failed: " + "; ".join(bad), "VERIFY")
+                # The player stream is fragmented, so mvhd holds no duration.
+                if capture and want and played and played < want - 1.0:
+                    with contextlib.suppress(OSError):
+                        final.unlink()
+                    raise SunoError(f"the player stopped at {played:.1f}s of {want:.1f}s", "VERIFY")
 
             cover = None
             if self.args.cover:
@@ -1376,6 +1835,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--no-cover", dest="cover", action="store_false", help="do not save cover art")
     p.add_argument("--no-verify", action="store_true", help="skip the MP4 structure check")
+    p.add_argument(
+        "--capture",
+        dest="capture",
+        action="store_true",
+        help="play the song in a headless browser and record it, even when a plain file exists",
+    )
+    p.add_argument(
+        "--no-capture",
+        dest="capture",
+        action="store_false",
+        help="never start a browser, skip songs that are only served to the player",
+    )
+    p.set_defaults(capture=None)
     p.add_argument("--force", action="store_true", help="re-download songs already in history")
     p.add_argument("--overwrite", action="store_true", help="overwrite same-named files")
     p.add_argument("--dry-run", action="store_true", help="show what would be downloaded")
@@ -1540,17 +2012,21 @@ def main(argv: list[str] | None = None) -> int:
     log(f"{len(clips)} song(s) -> {out_dir}  (format: {args.format}, jobs: {args.jobs})")
 
     failures = 0
-    with futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        future_map = {pool.submit(downloader.process, clip): clip for clip in clips}
-        for fut in futures.as_completed(future_map):
-            clip = future_map[fut]
-            try:
-                line = fut.result()
-            except Exception as e:
-                line = f"FAILED: {clip_title(clip)}. {e}"
-            if "FAILED" in line:
-                failures += 1
-            print(line, flush=True)
+    try:
+        with futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+            future_map = {pool.submit(downloader.process, clip): clip for clip in clips}
+            for fut in futures.as_completed(future_map):
+                clip = future_map[fut]
+                try:
+                    line = fut.result()
+                except Exception as e:
+                    line = f"FAILED: {clip_title(clip)}. {e}"
+                if "FAILED" in line:
+                    failures += 1
+                print(line, flush=True)
+    finally:
+        if downloader.capture is not None:
+            downloader.capture.stop()
 
     verb = "would download" if args.dry_run else "downloaded"
     log(

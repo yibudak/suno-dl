@@ -89,6 +89,7 @@ def test_private_songs_are_explained_not_attempted(tmp_path):
         overwrite=False,
         out=str(tmp_path),
         bitrate=None,
+        capture=None,
     )
     downloader = Downloader(api=None, args=args, history=History(tmp_path / "h.json"))
     clip = {
@@ -99,7 +100,8 @@ def test_private_songs_are_explained_not_attempted(tmp_path):
         "video_url": "",
     }
     line = downloader.process(clip)
-    assert "PRIVATE" in line
-    assert "encrypted" in line
+    # Without a session there is no browser capture, so the song stays out of reach.
+    assert "NO_SESSION" in line
+    assert "capture" in line
     assert downloader.counts["failed"] == 1
     assert not list(tmp_path.glob("*.mp4"))

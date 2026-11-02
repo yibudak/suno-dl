@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "suno-dl"
-version = "1.0.0"
-description = "Download your own Suno songs at original quality from a single standard-library file"
+version = "1.1.0"
+description = "Download your own Suno songs at original quality from a single standard-library file, private ones included"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

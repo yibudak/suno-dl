@@ -4,18 +4,23 @@
 
 **Download the songs you made on Suno, at the quality Suno serves them.**
 
-The whole tool is one Python file that uses only the standard library.
+The whole tool is one Python file that uses only the standard library. Private
+songs, which Suno serves only to its own player, come through a headless Chrome.
 
 ![python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square)
-![dependencies](https://img.shields.io/badge/dependencies-none-brightgreen?style=flat-square)
+![dependencies](https://img.shields.io/badge/python%20packages-none-brightgreen?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-black?style=flat-square)
 
 </div>
 
 `suno-dl` signs in with your Suno session, lists the songs your account owns, and
-saves the original MP4. It reads the file back before reporting success, so a
+saves the original audio. It reads the file back before reporting success, so a
 dropped connection fails the song instead of leaving a half file. Ask for mp3,
 flac, wav, opus or m4a and it runs the conversion through ffmpeg.
+
+Public songs download straight from the CDN. Private songs have no such file, so
+the tool plays them in a hidden Chrome and records what the player decodes. Either
+way Suno's download quota stays untouched.
 
 ```console
 $ suno-dl --library
@@ -28,7 +33,9 @@ done: 3 downloaded, 0 skipped, 0 failed
 
 ## What you get
 
-- **The file Suno serves.** The default format copies the MP4 without re-encoding.
+- **The file Suno serves.** The default format copies the stream without re-encoding.
+- **Private songs too.** A clip Suno only streams to its player is played in a
+  headless Chrome and captured, so nothing needs to be published first.
 - **Resume and verification.** A dropped download continues from the last byte,
   and the tool inspects the MP4 boxes and duration before it marks the song done.
 - **A history file.** `~/.suno-dl/history.json` records what you downloaded, so
@@ -48,7 +55,8 @@ suno-dl --library
 ```
 
 Python 3.10 or newer. The single file needs no virtualenv, no build step and no
-dependencies.
+Python packages. Converting needs ffmpeg. Private songs need Chrome or Chromium;
+`--no-capture` drops that requirement too.
 
 ## Sign in
 
@@ -124,39 +132,54 @@ suno-dl --library --dry-run              # show the plan, touch nothing
 | `-o, --out` | output folder (default `~/Music/Suno`) |
 | `--force` | download again even when history says you have it |
 | `--no-cover` | skip the artwork file |
+| `--capture` | always record from the player, even for public songs |
+| `--no-capture` | never start a browser, skip songs only served to the player |
 
-Public songs, playlists and profiles work without a cookie. Private and unlisted
-songs need a session.
+Private songs need a session and Chrome or Chromium (the tool looks in the usual
+places, or takes `SUNO_DL_BROWSER`). Public songs, playlists and profiles work
+without either.
 
-### What it can and cannot fetch
+### How private songs are fetched
 
-Suno publishes a plain MP4 for public clips. When a clip is private or unlisted,
-`video_url` comes back empty and the only entry in `media_urls` is encrypted for
-Suno's player, which unlocks it with a license key. The tool reports what it found
-instead of saving ciphertext.
+Suno publishes a plain MP4 for public clips, and nothing for the rest: `video_url`
+comes back empty and the only entry in `media_urls` is a stream the page decrypts
+before it plays.
+
+For those songs the tool opens `suno.com/song/<id>` in a headless Chrome, presses
+play, and copies each buffer the page hands to the audio pipeline. That buffer
+holds decoded audio, so the capture writes a normal MP4 and no key work is needed.
 
 ```console
-FAILED (PRIVATE): <title>. Suno publishes a plain MP4 only for public clips, and
-this one is private. Its only stream is encrypted for Suno's player, so there is no
-file to fetch.
+$ suno-dl https://suno.com/song/<uuid> --session "$SUNO_SESSION"
+1 song(s) -> /Users/you/Music/Suno  (format: original, jobs: 3)
+ok: You - Draft Idea.mp4 (3.4 MB)
+done: 1 downloaded, 0 skipped, 0 failed
 ```
 
 Suno bills downloads separately from generation credits (`download_credit_packs`
 in `/api/billing/info/`), so its download button spends a limited resource.
-`suno-dl` does not press that button. It fetches the plain MP4 that Suno publishes
-for public clips.
+`suno-dl` never presses that button: public songs come from the CDN and private
+songs come out of the player, so a run costs no quota either way.
+
+A run needs Chrome and takes about as long as the song. `--no-capture` keeps the
+tool browser-free and skips those songs with `NO_SESSION` or `PRIVATE`.
 
 ## Under the hood
 
 For each song the tool:
 
 1. asks `/api/clip/{id}` for the title, artist, duration, artwork and media URL;
-2. picks the first candidate that returns real media, preferring the CDN MP4;
-3. downloads it with `Range`, resuming a `.part` file after a dropped connection;
+2. downloads the CDN file with `Range`, resuming a `.part` after a dropped
+   connection, when the clip has one;
+3. otherwise starts Chrome, loads the song page, and drains the buffers the page
+   appends to its SourceBuffer;
 4. inspects the container: `ftyp` first, one `moov`, no truncated box, and a
-   duration that matches the API;
+   duration that matches the API or the player;
 5. writes the cover beside the audio and records the song in
    `~/.suno-dl/history.json`.
+
+The capture path speaks DevTools over a socket the tool opens itself, so the file
+still pulls in no packages.
 
 Filenames follow `Artist - Title.ext`, sanitised for Windows, macOS and Linux,
 with ` (1)`, ` (2)` added on collisions.
@@ -168,7 +191,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 pre-commit install --hook-type pre-commit --hook-type pre-push
-pytest                      # 96 tests, no network
+pytest                      # 112 tests, no network
 ruff check . && ruff format --check .
 mypy suno_dl.py
 ```
@@ -181,9 +204,11 @@ Release, and publishes to PyPI through trusted publishing.
 ## Fair use
 
 The tool authenticates as **you** and downloads what your account can already
-play. Download your own work, or work you have the right to keep. It does not
-bypass any protection and does not touch Suno's encrypted stream. Respect the
-platform's terms and the artists.
+play. Download your own work, or work you have the right to keep.
+
+The capture path is not a key server and does not hold a licence: it records audio
+Suno's own page has already decrypted in the browser, and it costs Suno no download
+quota. Respect the platform's terms and the artists.
 
 ## License
 
