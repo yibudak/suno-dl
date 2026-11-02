@@ -42,6 +42,12 @@ dev = [
 [project.scripts]
 suno-dl = "suno_dl:main"
 
+[project.urls]
+Homepage = "https://github.com/yibudak/suno-dl"
+Repository = "https://github.com/yibudak/suno-dl"
+Issues = "https://github.com/yibudak/suno-dl/issues"
+Changelog = "https://github.com/yibudak/suno-dl/releases"
+
 [tool.setuptools]
 py-modules = ["suno_dl"]
 
