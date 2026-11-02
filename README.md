@@ -24,7 +24,7 @@ way Suno's download quota stays untouched.
 
 ```console
 $ suno-dl --library
-3 song(s) -> /Users/you/Music/Suno  (format: original, jobs: 3)
+3 song(s) -> /Users/you/suno-dl/downloads  (format: original, jobs: 3)
 ok: Afterglow.mp4 (8.3 MB)
 ok: Slow Motion.mp4 (8.8 MB)
 ok: Paper Planes.mp4 (8.2 MB)
@@ -129,7 +129,7 @@ suno-dl --library --dry-run              # show the plan, touch nothing
 | `-j, --jobs` | parallel downloads (default 3) |
 | `-n, --limit` | stop after N songs |
 | `--since YYYY-MM-DD` | only songs created from that date |
-| `-o, --out` | output folder (default `~/Music/Suno`) |
+| `-o, --out` | output folder (default `./downloads`) |
 | `--force` | download again even when history says you have it |
 | `--no-cover` | skip the artwork file |
 | `--capture` | always record from the player, even for public songs |
@@ -151,7 +151,7 @@ holds decoded audio, so the capture writes a normal MP4 and no key work is neede
 
 ```console
 $ suno-dl https://suno.com/song/<uuid> --session "$SUNO_SESSION"
-1 song(s) -> /Users/you/Music/Suno  (format: original, jobs: 3)
+1 song(s) -> /Users/you/suno-dl/downloads  (format: original, jobs: 3)
 ok: You - Draft Idea.mp4 (3.4 MB)
 done: 1 downloaded, 0 skipped, 0 failed
 ```

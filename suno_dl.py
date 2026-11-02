@@ -1459,7 +1459,7 @@ class Downloader:
         self.api = api
         self.args = args
         self.history = history
-        self.out_dir = Path(args.out).expanduser()
+        self.out_dir = Path(args.out).expanduser().resolve()
         self.lock = threading.Lock()
         self.counts = {"ok": 0, "skipped": 0, "failed": 0}
         self.capture: Capture | None = None
@@ -1838,7 +1838,7 @@ def list_profile(api: SunoAPI, handle: str, limit: int) -> list[dict]:
 
 
 def default_out_dir() -> str:
-    return str(Path.home() / "Music" / "Suno")
+    return "downloads"
 
 
 EPILOG = """\
@@ -2078,7 +2078,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{c.get('id')}  {mins}:{secs:02d}  {clip_artist(c)} - {clip_title(c)}")
         return 0
 
-    out_dir = Path(args.out).expanduser()
+    out_dir = Path(args.out).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     history = History()
     downloader = Downloader(api, args, history)
