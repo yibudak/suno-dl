@@ -1,0 +1,33 @@
+# — Python ————————————————————————————————————————————————
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# — packaging ——————————————————————————————————————————————
+*.whl
+*.tar.gz
+
+# — local secrets and state ——————————————————————————————————
+# anything that might hold a Suno cookie or a download history
+.env
+.env.*
+cookies*.txt
+*cookie*.json
+.suno-dl/
+downloads/
+
+# — editors / OS ————————————————————————————————————————————
+.DS_Store
+.idea/
+.vscode/
+*.swp

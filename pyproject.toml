@@ -1,0 +1,102 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "suno-dl"
+version = "1.0.0"
+description = "Download your own Suno songs at original quality — one file, standard library only"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "suno-dl contributors" }]
+keywords = ["suno", "music", "downloader", "cli", "ai-music", "opus", "mp3"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Multimedia :: Sound/Audio",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pre-commit>=3.7",
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "mypy>=1.11",
+  "ruff>=0.6",
+  "build>=1.2",
+]
+
+[project.scripts]
+suno-dl = "suno_dl:main"
+
+[tool.setuptools]
+py-modules = ["suno_dl"]
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers --strict-config"
+markers = ["network: hits the real suno.com API (skipped by default)"]
+
+[tool.coverage.run]
+branch = true
+source = ["suno_dl"]
+
+[tool.coverage.report]
+skip_covered = true
+exclude_lines = [
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+]
+
+# ---------------------------------------------------------------------------
+# Lint / format
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "PIE", "PT", "RUF"]
+ignore = [
+  "E501",   # long lines are handled by the formatter
+  "RUF001", # ambiguous unicode in strings (em dashes in messages are intentional)
+  "RUF002",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["SIM117"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+files = ["suno_dl.py"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+strict_equality = true
+check_untyped_defs = true

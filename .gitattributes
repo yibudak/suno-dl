@@ -1,0 +1,12 @@
+# Normalise line endings for every text file; never touch binary assets.
+* text=auto eol=lf
+
+*.py    text diff=python
+*.md    text
+*.toml  text
+*.yml   text
+*.yaml  text
+
+*.jpg   binary
+*.png   binary
+*.mp4   binary
