@@ -90,6 +90,16 @@ def short_url(url: str, limit: int = 90) -> str:
     return url if len(url) <= limit else url[: limit - 1] + "…"
 
 
+def human_duration(seconds: int) -> str:
+    """Compact '2h 14m' style duration, for token-expiry messages."""
+    seconds = max(0, int(seconds))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            whole, rest = divmod(seconds, size)
+            return f"{whole}{unit}" + (f" {rest // 60}m" if unit == "d" and rest >= 60 else "")
+    return f"{seconds}s"
+
+
 def log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
@@ -187,6 +197,18 @@ def looks_like_jwt(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*", value or ""))
 
 
+def normalize_token(raw: str | None, *, default_key: str) -> str | None:
+    """Accept a token, a `__session=…` assignment, or a whole Cookie header."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    if "=" in raw:
+        cookies = parse_cookies(raw)
+        raw = cookies.get("__session") or cookies.get(default_key) or ""
+    raw = raw.strip().strip('"').strip("'")
+    return raw or None
+
+
 def parse_cookies(raw: str) -> dict[str, str]:
     """Accept a full Cookie header, a `name=value` list, or a bare token."""
     out: dict[str, str] = {}
@@ -194,8 +216,8 @@ def parse_cookies(raw: str) -> dict[str, str]:
     if not raw:
         return out
     if "=" not in raw and looks_like_jwt(raw):
-        # A bare token: it is a __client token.
-        out["__client"] = raw
+        # A bare token: almost always the short-lived __session JWT.
+        out["__session"] = raw
         return out
     for part in raw.split(";"):
         part = part.strip()
@@ -210,12 +232,16 @@ def parse_cookies(raw: str) -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------
-# Authentication: __client -> Clerk JWT
+# Authentication
+#
+# Two shapes of credential, both just a bearer token in the end:
+#   __session  a ready JWT from suno.com, valid for minutes
+#   __client   a long-lived Clerk cookie, exchanged for a JWT on demand
 # --------------------------------------------------------------------------
 
 
 class Auth:
-    """Mints and caches the bearer token Suno's API expects."""
+    """Holds a valid bearer token, minting one from __client when needed."""
 
     def __init__(
         self, cookie: str | None = None, session: str | None = None, verbose: bool = False
@@ -227,25 +253,50 @@ class Auth:
 
         cookies = parse_cookies(cookie or "")
         self.client_token = (cookies.get("__client") or "").strip() or None
-        fixed = (session or cookies.get("__session") or "").strip()
 
-        if (
-            fixed
-            and looks_like_jwt(fixed)
-            and (jwt_exp(fixed) or 0) > time.time() + JWT_REFRESH_MARGIN
-        ):
-            self._jwt = fixed
+        supplied = (
+            normalize_token(session, default_key="__client")
+            or (cookies.get("__session") or "").strip()
+        )
+        self.session_token = supplied if supplied and looks_like_jwt(supplied) else None
+        self.expires_at = jwt_exp(self.session_token) if self.session_token else None
+
+        if self.session_token and (self.expires_at or 0) > time.time() + JWT_REFRESH_MARGIN:
+            self._jwt = self.session_token
             if self.verbose:
-                log("auth: using supplied __session token")
-        elif fixed and looks_like_jwt(fixed) and self.verbose:
-            log("auth: supplied __session is expired — will re-mint from __client")
+                log(f"auth: using the supplied __session token ({self.describe_expiry()})")
+        elif self.session_token and self.verbose:
+            log(f"auth: the supplied __session token is {self.describe_expiry()}")
 
         if not self.client_token and not self._jwt:
+            if self.session_token:
+                raise AuthError(
+                    f"Your __session token {self.describe_expiry()}. Copy a fresh one from "
+                    "DevTools -> Application -> Cookies -> suno.com -> __session and run "
+                    "again right away (it only lives for minutes). If you also have a "
+                    "__client cookie, pass that instead — the tool then refreshes itself.",
+                    "SESSION_EXPIRED",
+                )
             raise AuthError(
-                "No Suno credentials. Pass --cookie with your __client cookie "
-                "(or set SUNO_COOKIE). See --help.",
+                "No Suno credentials found. Pass --session with your __session JWT, "
+                "or --cookie with a __client cookie (or set SUNO_SESSION / SUNO_COOKIE).",
                 "NO_AUTH",
             )
+
+    # -- token bookkeeping ------------------------------------------------
+
+    def describe_expiry(self) -> str:
+        if not self.expires_at:
+            return "has no readable expiry"
+        left = int(self.expires_at - time.time())
+        if left <= 0:
+            return f"expired {human_duration(-left)} ago"
+        return f"expires in {human_duration(left)}"
+
+    def source(self) -> str:
+        if self.session_token and self._jwt is self.session_token:
+            return "__session"
+        return "__client" if self.client_token else "none"
 
     # -- Clerk ------------------------------------------------------------
 
@@ -290,10 +341,17 @@ class Auth:
         client = self._clerk_client()
         sessions = client.get("sessions") or []
         if not sessions:
+            hint = ""
+            if self.client_token and looks_like_jwt(self.client_token):
+                hint = (
+                    " If you pasted a __session token, use --session (or SUNO_SESSION) "
+                    "instead: __session is a ready bearer token, __client is the one that "
+                    "gets exchanged for it."
+                )
             raise AuthError(
-                "Clerk returned no sessions for this __client token — the cookie is "
-                "expired or was copied from another profile. Log out and back in on "
-                "suno.com, then copy __client again.",
+                "Clerk returned no sessions for this __client token — it is expired or "
+                "was copied from another profile. Log out and back in on suno.com, then "
+                "copy __client again." + hint,
                 "NO_SESSION",
             )
         active = [s for s in sessions if s.get("status") == "active"] or sessions
@@ -335,6 +393,17 @@ class Auth:
 # --------------------------------------------------------------------------
 
 
+def rejected_session(error: HttpError) -> SunoError:
+    """A 401 from the API almost always means the copied token has gone stale."""
+    if error.status != 401:
+        return error
+    return AuthError(
+        "Suno rejected the session (401). Copy a fresh __session from the browser, or "
+        "use a __client cookie so the tool can refresh itself.",
+        "TOKEN_REJECTED",
+    )
+
+
 class SunoAPI:
     def __init__(self, auth: Auth | None):
         self.auth = auth
@@ -346,7 +415,10 @@ class SunoAPI:
         url = API_BASE + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        return get_json(url, self._headers())
+        try:
+            return get_json(url, self._headers())
+        except HttpError as e:
+            raise rejected_session(e) from None
 
     def clip(self, clip_id: str) -> dict:
         return self._get(f"/api/clip/{clip_id}")
@@ -374,7 +446,10 @@ class SunoAPI:
 
     def feed(self, filters: dict | None = None, cursor: str | None = None, limit: int = 50) -> dict:
         body = {"cursor": cursor, "limit": limit, "filters": filters or {}}
-        return post_json(API_BASE + "/api/feed/v3", body, self._headers())
+        try:
+            return post_json(API_BASE + "/api/feed/v3", body, self._headers())
+        except HttpError as e:
+            raise rejected_session(e) from None
 
     def feed_legacy(self, page: int = 0) -> list:
         data = self._get("/api/feed/", {"page": page})
@@ -1036,17 +1111,22 @@ def dedupe(clips: list[dict]) -> list[dict]:
     return out
 
 
+def identity_from_me(me: dict) -> tuple[str | None, str | None]:
+    """Best-effort (user_id, handle) from an /api/user/me payload."""
+    user = me.get("user")
+    nested: dict = user if isinstance(user, dict) else {}
+    uid = me.get("id") or me.get("user_id") or nested.get("id")
+    handle = me.get("handle") or me.get("user_handle") or nested.get("handle")
+    return (str(uid) if uid else None), (str(handle) if handle else None)
+
+
 def account_identity(api: SunoAPI) -> tuple[str | None, str | None]:
     """Best-effort (user_id, handle) of the signed-in account."""
     try:
         me = api.me()
     except SunoError:
         return None, None
-    user = me.get("user")
-    nested: dict = user if isinstance(user, dict) else {}
-    uid = me.get("id") or me.get("user_id") or nested.get("id")
-    handle = me.get("handle") or me.get("user_handle") or nested.get("handle")
-    return (str(uid) if uid else None), (str(handle) if handle else None)
+    return identity_from_me(me)
 
 
 def only_mine(clips: list[dict], uid: str | None, handle: str | None) -> list[dict]:
@@ -1216,12 +1296,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--cookie",
         default=os.environ.get("SUNO_COOKIE"),
-        help="your __client cookie value, a Cookie header, or __session=… (default: $SUNO_COOKIE)",
+        help="a __client cookie, a whole Cookie header, or __session=… (default: $SUNO_COOKIE)",
     )
     p.add_argument(
         "--session",
         default=os.environ.get("SUNO_SESSION"),
-        help="a ready __session JWT (short-lived; __client is better)",
+        help="a ready __session JWT from suno.com (works at once, expires in minutes)",
+    )
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="verify the session against the API, then exit",
     )
     p.add_argument("-o", "--out", default=default_out_dir(), help="output folder")
     p.add_argument(
@@ -1330,9 +1415,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.bitrate is None:
             args.bitrate = FORMATS[args.format][2]
 
-    if not args.cookie and not args.session and args.library:
+    if not args.cookie and not args.session and (args.library or args.check):
         # Public songs, playlists and profiles work without a token; a library needs one.
-        log("error: --library needs your __client cookie (--cookie or $SUNO_COOKIE)")
+        log(
+            "error: this needs a session — pass --session with your __session JWT, "
+            "or --cookie with a __client cookie"
+        )
         return 2
 
     auth: Auth | None = None
@@ -1345,6 +1433,24 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     api = SunoAPI(auth)
+
+    if args.check:
+        if auth is None:
+            log("error: --check needs --session or --cookie")
+            return 2
+        try:
+            me = api.me()
+        except SunoError as e:
+            log(f"error: {e}")
+            return 2
+        _uid, handle = identity_from_me(me)
+        name = str(me.get("display_name") or "").strip()
+        who = "@" + handle if handle else (_uid or "unknown")
+        print(f"ok: signed in as {who}" + (f" ({name})" if name else ""))
+        print(f"    {auth.source()} token, {auth.describe_expiry()}")
+        if auth.source() == "__session":
+            print("    tip: re-copy __session when it runs out, or use __client for long runs")
+        return 0
 
     try:
         clips = resolve_clips(api, args)

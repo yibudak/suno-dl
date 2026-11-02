@@ -28,7 +28,28 @@ def test_library_without_a_cookie_explains_itself(capsys, monkeypatch):
     monkeypatch.delenv("SUNO_COOKIE", raising=False)
     monkeypatch.delenv("SUNO_SESSION", raising=False)
     assert suno_dl.main(["--library"]) == 2
-    assert "__client cookie" in capsys.readouterr().err
+    assert "--session" in capsys.readouterr().err
+
+
+def test_check_without_credentials(capsys, monkeypatch):
+    monkeypatch.delenv("SUNO_COOKIE", raising=False)
+    monkeypatch.delenv("SUNO_SESSION", raising=False)
+    assert suno_dl.main(["--check"]) == 2
+
+
+def test_check_reports_the_account(capsys, monkeypatch):
+    import time
+
+    from test_auth import make_jwt
+
+    token = make_jwt(int(time.time()) + 600)
+    monkeypatch.setattr(
+        suno_dl.SunoAPI, "me", lambda self: {"handle": "someone", "display_name": "Some One"}
+    )
+    assert suno_dl.main(["--check", "--session", token]) == 0
+    out = capsys.readouterr().out
+    assert "signed in as @someone" in out
+    assert "__session token" in out
 
 
 def test_a_bad_cookie_is_rejected_before_any_network_call(capsys):

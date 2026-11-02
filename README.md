@@ -54,21 +54,54 @@ Python 3.10+. No virtualenv, no build step, no dependencies.
 
 ## Sign in
 
-Suno has no API keys, so `suno-dl` uses the same short-lived token flow as the
-web app. Grab your cookie once:
+Suno has no API keys, so `suno-dl` borrows the session your browser already
+holds. You copy one cookie out of DevTools — depending on your account you will
+see `__session`, `__client`, or both:
 
-1. Open <https://suno.com> and sign in.
-2. DevTools → **Application** → **Cookies** → `https://auth.suno.com`.
-3. Copy the value of **`__client`** (a long `eyJ…` string) — it is `HttpOnly`,
-   which is exactly why DevTools is the only way to see it.
+| cookie | lives on | lifetime | what the tool does with it |
+|---|---|---|---|
+| `__session` | suno.com | minutes | sends it straight to the API as the bearer token |
+| `__client` | auth.suno.com | weeks | exchanges it for a fresh bearer token, again and again |
+
+### Fast path — only `__session`? That works
+
+1. DevTools → **Application** → **Cookies** → `https://suno.com` → `__session`.
+2. Copy the value (a long `eyJ…` JWT) and pass it in:
+
+```bash
+export SUNO_SESSION='eyJhbGciOi…'
+suno-dl --check
+```
+
+`--check` tells you who you are and how long the token has left:
+
+```console
+$ suno-dl --check
+ok: signed in as @yourhandle (Your Name)
+    __session token, expires in 47s
+    tip: re-copy __session when it runs out, or use __client for long runs
+```
+
+The JWT lives for minutes, so start the download right after copying. If a run
+outlives it, the tool stops with a message telling you to paste a new one — it
+never silently gives up halfway.
+
+### Long runs — `__client`
+
+If `https://auth.suno.com` has a `__client` cookie as well, use that one
+instead: it is long-lived and the tool mints fresh tokens from it on its own.
 
 ```bash
 export SUNO_COOKIE='__client=eyJhbGciOi…'
+suno-dl --check
+suno-dl --library
 ```
 
-The `__client` cookie is exchanged for a JWT that expires in minutes; the script
-re-mints it automatically. Treat the cookie like a password — it opens your
-whole library. Prefer a secret manager or an env var over shell history.
+A whole `Cookie:` header pasted into `--cookie` works too — `__session` and
+`__client` are picked out of it automatically.
+
+Either way, treat the value like a password: it opens your whole library. Keep
+it in a secret manager or an env var, not in shell history.
 
 ## Use it
 
@@ -117,7 +150,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 pre-commit install --hook-type pre-commit --hook-type pre-push
-pytest                      # 80 tests, no network
+pytest                      # 90 tests, no network
 ruff check . && ruff format --check .
 mypy suno_dl.py
 ```

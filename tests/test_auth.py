@@ -24,7 +24,8 @@ def test_parse_cookies_accepts_a_header():
 
 def test_parse_cookies_accepts_a_bare_token():
     token = make_jwt(int(time.time()) + 600)
-    assert parse_cookies(token) == {"__client": token}
+    # a bare JWT is almost always the short-lived __session, not __client
+    assert parse_cookies(token) == {"__session": token}
 
 
 def test_parse_cookies_strips_quotes_and_spaces():
@@ -56,6 +57,42 @@ def test_auth_without_credentials_fails_fast():
     with pytest.raises(AuthError) as info:
         Auth()
     assert info.value.code == "NO_AUTH"
+    assert "--session" in str(info.value)
+
+
+def test_an_expired_session_alone_says_what_to_do(monkeypatch):
+    stale = make_jwt(int(time.time()) - 600)
+    with pytest.raises(AuthError) as info:
+        Auth(session=stale)
+    assert info.value.code == "SESSION_EXPIRED"
+    assert "__session" in str(info.value)
+
+
+def test_session_accepts_an_assignment_string():
+    token = make_jwt(int(time.time()) + 600)
+    auth = Auth(session="__session=" + token)
+    assert auth.token() == token
+    assert auth.source() == "__session"
+
+
+def test_session_cookie_is_used_directly():
+    token = make_jwt(int(time.time()) + 600)
+    auth = Auth(cookie="__session=" + token)
+    assert auth.token() == token
+
+
+def test_expiry_is_described_in_words():
+    fresh = Auth(session=make_jwt(int(time.time() + 3600)))
+    assert fresh.describe_expiry().startswith("expires in")
+    assert fresh.source() == "__session"
+
+
+def test_client_token_is_preferred_for_long_runs(monkeypatch):
+    fresh = make_jwt(int(time.time()) + 3600)
+    monkeypatch.setattr(Auth, "_mint", lambda self: make_jwt(int(time.time()) + 60))
+    auth = Auth(cookie="__client=" + make_jwt(int(time.time()) + 3600), session=fresh)
+    # a still-valid __session is used as-is, no Clerk round trip
+    assert auth.token() == fresh
 
 
 def test_auth_reuses_a_fresh_session_token():
