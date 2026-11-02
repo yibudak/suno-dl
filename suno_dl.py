@@ -486,6 +486,8 @@ def parse_target(raw: str) -> tuple[str, str]:
     path = parsed.path.rstrip("/")
     parts = [p for p in path.split("/") if p]
 
+    if len(parts) == 2 and parts[0] == "s":
+        return "short", parts[1]
     if len(parts) >= 2 and parts[0] == "song" and UUID_RE.match(parts[1]):
         return "song", parts[1].lower()
     if len(parts) >= 2 and parts[0] == "playlist" and UUID_RE.match(parts[1]):
@@ -501,6 +503,22 @@ def parse_target(raw: str) -> tuple[str, str]:
         return "song", parts[-1].lower()
 
     raise SunoError(f"could not understand the link: {raw}", "BAD_TARGET")
+
+
+def resolve_short_link(code: str) -> str:
+    """Follow a suno.com/s/<code> share link to the real song URL."""
+    url = f"https://suno.com/s/{code}"
+    final = ""
+    try:
+        with _open(url, method="HEAD", timeout=30) as resp:
+            final = resp.geturl()
+    except urllib.error.HTTPError as e:
+        final = e.geturl() or ""
+    except (SunoError, urllib.error.URLError):
+        final = ""
+    if not final or final.rstrip("/") == url:
+        raise SunoError(f"could not resolve the share link {url}", "SHORT_LINK")
+    return final
 
 
 # --------------------------------------------------------------------------
@@ -555,7 +573,12 @@ def usable_url(url: str | None) -> str | None:
 
 
 def clip_audio_urls(clip: dict) -> list[str]:
-    """Ordered candidates for the original audio file, best first."""
+    """Ordered candidates for the plain media file, best first.
+
+    `media_urls` is deliberately not a candidate: that stream is encrypted for
+    Suno's player (license server + AES-GCM), so a plain fetch only yields
+    ciphertext. Only the progressive MP4 is a real file.
+    """
     urls: list[str] = []
 
     def add(url: str | None) -> None:
@@ -564,14 +587,22 @@ def clip_audio_urls(clip: dict) -> list[str]:
             urls.append(url)
 
     add(clip.get("video_url"))
-    for media in clip.get("media_urls") or []:
-        if isinstance(media, dict):
-            add(media.get("url"))
     add(clip.get("audio_url"))
     clip_id = clip.get("id")
     if clip_id and UUID_RE.match(str(clip_id)):
         add(f"{CDN_BASE}/{clip_id}.mp4")
     return urls
+
+
+def private_or_missing(clip: dict, title: str) -> str:
+    """Explain why a song with no plain media URL cannot be fetched."""
+    if clip.get("is_public") is False:
+        return (
+            f"FAILED (PRIVATE): {title} — Suno only serves private/unlisted songs "
+            "through its encrypted player, so there is no plain file to download. "
+            "Publish the song (or use Suno's own download button) and run again."
+        )
+    return f"FAILED (NO_MEDIA): {title} — no progressive MP4 is published for this song."
 
 
 def clip_cover_url(clip: dict) -> str | None:
@@ -967,6 +998,11 @@ class Downloader:
             self._count("skipped")
             return f"skip ({status}): {title}"
 
+        # A private clip has no plain file: its only media is the DRM stream.
+        if clip.get("is_public") is False and not usable_url(clip.get("video_url")):
+            self._count("failed")
+            return private_or_missing(clip, title)
+
         fmt = self.args.format
         ext = FORMATS[fmt][0]
         history_key = f"{clip_id}:{ext}"
@@ -982,7 +1018,7 @@ class Downloader:
         urls = clip_audio_urls(clip)
         if not urls:
             self._count("failed")
-            return f"FAILED (no download url): {title}"
+            return private_or_missing(clip, title)
 
         if self.args.dry_run:
             self._count("ok")
@@ -1073,8 +1109,11 @@ class Downloader:
                 )
                 if status == 200:
                     ctype = headers.get("Content-Type") or headers.get("content-type") or ""
-                    if "text/html" in ctype.lower():
-                        raise SunoError("server returned an HTML page", "NOT_MEDIA")
+                    if any(bad in ctype.lower() for bad in ("text/", "application/xml")):
+                        raise SunoError(
+                            f"server returned {ctype or 'a non-media body'}, not audio",
+                            "NOT_MEDIA",
+                        )
                     length = headers.get("Content-Length") or headers.get("content-length")
                     return url, int(length) if length else None
                 last = SunoError(f"HTTP {status}", "HTTP", status)
@@ -1082,8 +1121,7 @@ class Downloader:
                 last = e
                 continue
         raise SunoError(
-            f"no downloadable media for this song ({last}). "
-            "Private songs need a valid __client cookie.",
+            f"no plain media is published for this song ({last})",
             "NO_MEDIA",
         )
 
@@ -1356,6 +1394,8 @@ def resolve_clips(api: SunoAPI, args) -> list[dict]:
 
     for raw in args.targets:
         kind, value = parse_target(raw)
+        if kind == "short":
+            kind, value = parse_target(resolve_short_link(value))
         if kind == "song":
             try:
                 clips.append(api.clip(value))

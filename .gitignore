@@ -23,6 +23,9 @@ htmlcov/
 .env.*
 cookies*.txt
 *cookie*.json
+token
+*.token
+*.jwt
 .suno-dl/
 downloads/
 

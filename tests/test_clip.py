@@ -42,9 +42,14 @@ def test_audio_urls_prefer_the_cdn_video_file():
         "media_urls": [{"url": "https://example.invalid/a.m4a"}],
     }
     urls = clip_audio_urls(clip)
-    assert urls[0] == f"https://cdn1.suno.ai/{UUID}.mp4"
-    assert urls[1] == "https://example.invalid/a.m4a"
+    assert urls == [f"https://cdn1.suno.ai/{UUID}.mp4"]
     assert all("forbidden" not in url for url in urls)
+
+
+def test_the_drm_stream_is_never_a_candidate():
+    """media_urls is encrypted for Suno's player; a plain GET returns ciphertext."""
+    clip = {"id": UUID, "media_urls": [{"url": "https://example.invalid/encrypted.m4a"}]}
+    assert clip_audio_urls(clip) == [f"https://cdn1.suno.ai/{UUID}.mp4"]
 
 
 def test_audio_urls_fall_back_to_the_cdn_pattern():
@@ -67,3 +72,34 @@ def test_cover_url_prefers_the_large_image():
     assert clip_cover_url(clip) == "https://cdn2.suno.ai/large.jpeg"
     assert clip_cover_url({"image_url": "https://cdn2.suno.ai/small.jpeg"}).endswith("small.jpeg")
     assert clip_cover_url({}) is None
+
+
+def test_private_songs_are_explained_not_attempted(tmp_path):
+    import argparse
+
+    from suno_dl import Downloader, History
+
+    args = argparse.Namespace(
+        format="original",
+        force=False,
+        dry_run=False,
+        cover=False,
+        quiet=True,
+        no_verify=False,
+        overwrite=False,
+        out=str(tmp_path),
+        bitrate=None,
+    )
+    downloader = Downloader(api=None, args=args, history=History(tmp_path / "h.json"))
+    clip = {
+        "id": UUID,
+        "title": "Secret Song",
+        "status": "complete",
+        "is_public": False,
+        "video_url": "",
+    }
+    line = downloader.process(clip)
+    assert "PRIVATE" in line
+    assert "encrypted" in line
+    assert downloader.counts["failed"] == 1
+    assert not list(tmp_path.glob("*.mp4"))

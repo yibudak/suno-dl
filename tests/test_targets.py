@@ -26,6 +26,8 @@ PLAYLIST = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
         ("@someone", ("profile", "someone")),
         ("https://suno.com/profile/someone", ("profile", "someone")),
         ("https://suno.ai/song/" + UUID, ("song", UUID)),
+        ("https://suno.com/s/giPd0wZMswx102q4", ("short", "giPd0wZMswx102q4")),
+        ("suno.com/s/abc123", ("short", "abc123")),
     ],
 )
 def test_targets_are_understood(raw, expected):

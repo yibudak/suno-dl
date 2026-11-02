@@ -82,9 +82,10 @@ ok: signed in as @yourhandle (Your Name)
     tip: re-copy __session when it runs out, or use __client for long runs
 ```
 
-The JWT lives for minutes, so start the download right after copying. If a run
-outlives it, the tool stops with a message telling you to paste a new one — it
-never silently gives up halfway.
+The JWT lives for minutes, but it is only needed to **list** your songs — the
+files themselves come from the CDN, unauthenticated. A fresh token is therefore
+enough to start even a large library; if the listing itself outlives it, the tool
+says so instead of failing silently.
 
 ### Long runs — `__client`
 
@@ -127,6 +128,23 @@ suno-dl --library --dry-run              # show the plan, touch nothing
 
 Public songs, playlists and profiles work without a cookie. Private and unlisted
 songs need `--library` with your session.
+
+### What it can — and cannot — fetch
+
+Suno publishes a plain MP4 only for songs that are **public** and downloadable on
+your plan. A private or unlisted song has no such file: its only stream is the
+encrypted one Suno's player unlocks with a license key. The tool says so instead
+of saving ciphertext:
+
+```console
+FAILED (PRIVATE): <title> — Suno only serves private/unlisted songs through its
+encrypted player, so there is no plain file to download.
+```
+
+Want a copy of your own private song? Publish it in Suno, run `suno-dl`, then
+flip it back to private. If `/api/clip/{id}` reports `"is_download_unlocked":
+false`, downloads are not enabled for that account/plan at all — that is a Suno
+setting, not something this tool can change.
 
 ## Under the hood
 
